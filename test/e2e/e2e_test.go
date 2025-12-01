@@ -34,7 +34,7 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "mlflow-operator-system"
+const namespace = "opendatahub"
 
 // serviceAccountName created for the project
 const serviceAccountName = "mlflow-operator-controller-manager"
@@ -297,6 +297,8 @@ func serviceAccountToken() (string, error) {
 		return "", err
 	}
 
+	defer os.Remove(tokenRequestFile) // Clean up temp file
+
 	var out string
 	verifyTokenCreation := func(g Gomega) {
 		// Execute kubectl command to create the token
@@ -316,9 +318,11 @@ func serviceAccountToken() (string, error) {
 
 		out = token.Status.Token
 	}
-	Eventually(verifyTokenCreation).Should(Succeed())
+	if !Eventually(verifyTokenCreation).Should(Succeed()) {
+		return "", fmt.Errorf("failed to create service account token")
+	}
 
-	return out, err
+	return out, nil
 }
 
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.

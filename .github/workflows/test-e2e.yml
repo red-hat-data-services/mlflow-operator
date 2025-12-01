@@ -2,7 +2,18 @@ name: E2E Tests
 
 on:
   push:
+    branches:
+      - 'main'
   pull_request:
+    paths:
+      - '.github/**'
+      - 'cmd/**'
+      - 'config/**'
+      - 'test/**'
+      - 'Dockerfile'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
 
 jobs:
   test-e2e:
