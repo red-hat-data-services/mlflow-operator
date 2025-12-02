@@ -1,6 +1,3 @@
-//go:build e2e
-// +build e2e
-
 /*
 Copyright 2025.
 
@@ -21,25 +18,33 @@ package e2e
 
 import (
 	"fmt"
-	"os/exec"
+	"os"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/opendatahub-io/mlflow-operator/test/utils"
 )
 
 var (
 	// projectImage is the name of the image which will be build and loaded
 	// with the code source changes to be tested.
-	projectImage = "example.com/mlflow-operator:v0.0.1"
+	// This should be set via the IMG environment variable.
+	projectImage = getProjectImage()
 )
+
+// getProjectImage retrieves the operator image to use for testing.
+// It checks the IMG environment variable, defaulting to a standard value if not set.
+func getProjectImage() string {
+	img := os.Getenv("IMG")
+	if img == "" {
+		img = "example.com/mlflow-operator:v0.0.1"
+	}
+	return img
+}
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
 // temporary environment to validate project changes with the purpose of being used in CI jobs.
-// The default setup requires Kind, builds/loads the Manager Docker image locally, and installs
-// CertManager.
+// The test assumes that a Kubernetes cluster is already running and the operator image is built and loaded.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting mlflow-operator integration test suite\n")
@@ -47,16 +52,7 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager(Operator) image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
-
-	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
-	// built and available before running the tests. Also, remove the following block.
-	By("loading the manager(Operator) image on Kind")
-	err = utils.LoadImageToKindClusterWithName(projectImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
+	// Setup
 })
 
 var _ = AfterSuite(func() {
