@@ -1,6 +1,3 @@
-//go:build e2e
-// +build e2e
-
 /*
 Copyright 2025.
 
@@ -78,7 +75,15 @@ var _ = Describe("Manager", Ordered, func() {
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
+		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up the ClusterRoleBinding for metrics")
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up any MLflow resources")
+		cmd = exec.Command("kubectl", "delete", "mlflow", "--all", "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -174,8 +179,12 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
+			By("cleaning up any existing ClusterRoleBinding for metrics")
+			cmd := exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
+			cmd = exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=mlflow-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
@@ -213,6 +222,10 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyMetricsServerStarted, 3*time.Minute, time.Second).Should(Succeed())
 
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
+
+			By("cleaning up any existing curl-metrics pod")
+			cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
@@ -279,7 +292,11 @@ spec: {}`
 			mlflowFile := filepath.Join("/tmp", "mlflow-valid.yaml")
 			err := os.WriteFile(mlflowFile, []byte(mlflowYAML), os.FileMode(0o644))
 			Expect(err).NotTo(HaveOccurred(), "Failed to write valid MLflow manifest")
-			defer os.Remove(mlflowFile)
+			defer func() {
+				if removeErr := os.Remove(mlflowFile); removeErr != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", mlflowFile, removeErr)
+				}
+			}()
 
 			cmd := exec.Command("kubectl", "apply", "-f", mlflowFile)
 			_, err = utils.Run(cmd)
@@ -301,7 +318,11 @@ spec: {}`
 			invalidFile := filepath.Join("/tmp", "mlflow-invalid.yaml")
 			err = os.WriteFile(invalidFile, []byte(invalidYAML), os.FileMode(0o644))
 			Expect(err).NotTo(HaveOccurred(), "Failed to write invalid MLflow manifest")
-			defer os.Remove(invalidFile)
+			defer func() {
+				if removeErr := os.Remove(invalidFile); removeErr != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", invalidFile, removeErr)
+				}
+			}()
 
 			cmd = exec.Command("kubectl", "apply", "-f", invalidFile)
 			output, err = utils.Run(cmd)
@@ -352,7 +373,12 @@ func serviceAccountToken() (string, error) {
 		return "", err
 	}
 
-	defer os.Remove(tokenRequestFile) // Clean up temp file
+	defer func(name string) {
+		err := os.Remove(name)
+		if err != nil {
+			_ = fmt.Sprintf("Failed to remove file %s", name)
+		}
+	}(tokenRequestFile) // Clean up temp file
 
 	var out string
 	verifyTokenCreation := func(g Gomega) {

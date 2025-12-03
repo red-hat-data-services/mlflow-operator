@@ -61,33 +61,41 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-KIND_CLUSTER ?= mlflow-operator-test-e2e
+# E2E test configuration
+KIND_CLUSTER ?= mlflow
+E2E_IMG ?= example.com/mlflow-operator:v0.0.1
 
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+.PHONY: setup-kind-cluster
+setup-kind-cluster: ## Create a Kind cluster for e2e tests if it doesn't exist
+	@if $(KIND) get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER)$$"; then \
+		echo "Kind cluster '$(KIND_CLUSTER)' already exists."; \
+	else \
+		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
+		$(KIND) create cluster --name $(KIND_CLUSTER); \
+	fi
+
+.PHONY: build-and-load-image
+build-and-load-image: ## Build the operator image and load it into the Kind cluster
+	@echo "Building operator image $(E2E_IMG)..."
+	$(MAKE) docker-build IMG=$(E2E_IMG)
+	@echo "Loading image into Kind cluster '$(KIND_CLUSTER)'..."
+	$(KIND) load docker-image $(E2E_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v; \
-	test_exit=$$?; \
-	$(MAKE) cleanup-test-e2e; \
-	exit $$test_exit
+test-e2e: manifests generate fmt vet ## Run the e2e tests against an existing Kubernetes cluster.
+	IMG=$(E2E_IMG) go test ./test/e2e/ -v -ginkgo.v
 
-.PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+.PHONY: test-e2e-full
+test-e2e-full: setup-kind-cluster build-and-load-image test-e2e ## Run the complete e2e workflow: setup cluster, build/load image, and run tests.
+
+.PHONY: cleanup-kind-cluster
+cleanup-kind-cluster: ## Delete the Kind cluster used for e2e tests
+	@if $(KIND) get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER)$$"; then \
+		echo "Deleting Kind cluster '$(KIND_CLUSTER)'..."; \
+		$(KIND) delete cluster --name $(KIND_CLUSTER); \
+	else \
+		echo "Kind cluster '$(KIND_CLUSTER)' does not exist."; \
+	fi
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
