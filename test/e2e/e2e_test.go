@@ -268,6 +268,61 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
+		It("should validate CEL constraint for singleton MLflow resource", func() {
+			By("creating an MLflow resource with the correct name 'mlflow'")
+			mlflowYAML := `apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+spec: {}`
+
+			mlflowFile := filepath.Join("/tmp", "mlflow-valid.yaml")
+			err := os.WriteFile(mlflowFile, []byte(mlflowYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred(), "Failed to write valid MLflow manifest")
+			defer os.Remove(mlflowFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", mlflowFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create MLflow resource with name 'mlflow'")
+
+			By("verifying the MLflow resource was created successfully")
+			cmd = exec.Command("kubectl", "get", "mlflow", "mlflow", "-o", "jsonpath={.metadata.name}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("mlflow"), "MLflow resource should exist with name 'mlflow'")
+
+			By("attempting to create an MLflow resource with an invalid name")
+			invalidYAML := `apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: invalid-name
+spec: {}`
+
+			invalidFile := filepath.Join("/tmp", "mlflow-invalid.yaml")
+			err = os.WriteFile(invalidFile, []byte(invalidYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred(), "Failed to write invalid MLflow manifest")
+			defer os.Remove(invalidFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", invalidFile)
+			output, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "Should fail to create MLflow with invalid name")
+			Expect(output).To(ContainSubstring("MLflow resource name must be 'mlflow'"),
+				"Error message should indicate name validation failure")
+
+			By("cleaning up the valid MLflow resource")
+			cmd = exec.Command("kubectl", "delete", "mlflow", "mlflow")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete MLflow resource")
+
+			By("verifying the MLflow resource was deleted")
+			verifyDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mlflow", "mlflow")
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "MLflow resource should not exist after deletion")
+			}
+			Eventually(verifyDeleted, 30*time.Second).Should(Succeed())
+		})
+
 		// TODO: Customize the e2e test suite with scenarios specific to your project.
 		// Consider applying sample/CR(s) and check their status and/or verifying
 		// the reconciliation by using the metrics, i.e.:

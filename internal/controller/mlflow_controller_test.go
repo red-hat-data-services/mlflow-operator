@@ -32,13 +32,12 @@ import (
 
 var _ = Describe("MLflow Controller", func() {
 	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+		const resourceName = "mlflow"
 
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default",
+			Name: resourceName,
 		}
 		mlflow := &mlflowv1.MLflow{}
 
@@ -48,8 +47,7 @@ var _ = Describe("MLflow Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				resource := &mlflowv1.MLflow{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
+						Name: resourceName,
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
