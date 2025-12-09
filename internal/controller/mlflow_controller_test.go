@@ -92,17 +92,20 @@ var _ = Describe("MLflow Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
+
 			controllerReconciler := &MLflowReconciler{
-				Client:    k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Namespace: "opendatahub",
-				ChartPath: "../../charts/mlflow",
+				Client:               k8sClient,
+				Scheme:               k8sClient.Scheme(),
+				Namespace:            "opendatahub",
+				ChartPath:            "../../charts/mlflow",
+				ConsoleLinkAvailable: false,
+				HTTPRouteAvailable:   false,
 			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+			_, reconcileErr := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
-			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileErr).NotTo(HaveOccurred())
 		})
 	})
 })
