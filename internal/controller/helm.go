@@ -35,18 +35,17 @@ import (
 )
 
 const (
-	defaultMLflowImage        = "quay.io/opendatahub/mlflow:main"
-	defaultKubeRbacProxyImage = "quay.io/opendatahub/odh-kube-auth-proxy:latest"
-	defaultStorageSize        = "2Gi"
-	defaultBackendStoreURI    = "sqlite:////mlflow/mlflow.db"
-	defaultArtifactsDest      = "file:///mlflow/artifacts"
+	defaultMLflowImage     = "quay.io/opendatahub/mlflow:master"
+	defaultStorageSize     = "2Gi"
+	defaultBackendStoreURI = "sqlite:////mlflow/mlflow.db"
+	defaultArtifactsDest   = "file:///mlflow/artifacts"
 )
 
 // getResourceSuffix returns the resource suffix for naming MLflow resources.
 // Returns empty string for CR named "mlflow", otherwise returns "-{crname}".
 // All resources are named as "mlflow{{ suffix }}".
 func getResourceSuffix(mlflowName string) string {
-	if mlflowName == "mlflow" {
+	if mlflowName == ResourceName {
 		return ""
 	}
 	return "-" + mlflowName
@@ -106,58 +105,14 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 		values["podLabels"] = podLabels
 	}
 
-	// Kube RBAC Proxy configuration
 	cfg := config.GetConfig()
-	// Default to enabled (matches kubebuilder default on KubeRbacProxyConfig.Enabled)
-	kubeRbacProxyEnabled := true
-	kubeRbacProxyImage := cfg.KubeAuthProxyImage
-	if kubeRbacProxyImage == "" {
-		kubeRbacProxyImage = defaultKubeRbacProxyImage
-	}
-	var kubeRbacProxyPullPolicy *string
 	tlsSecretName := TLSSecretName
-
-	if mlflow.Spec.KubeRbacProxy != nil {
-		// If explicitly set, use the specified value
-		if mlflow.Spec.KubeRbacProxy.Enabled != nil {
-			kubeRbacProxyEnabled = *mlflow.Spec.KubeRbacProxy.Enabled
-		}
-		// Otherwise, keep default (true) from kubebuilder marker
-
-		// Image configuration
-		if mlflow.Spec.KubeRbacProxy.Image != nil {
-			if mlflow.Spec.KubeRbacProxy.Image.Image != nil {
-				kubeRbacProxyImage = *mlflow.Spec.KubeRbacProxy.Image.Image
-			}
-			if mlflow.Spec.KubeRbacProxy.Image.ImagePullPolicy != nil {
-				policy := string(*mlflow.Spec.KubeRbacProxy.Image.ImagePullPolicy)
-				kubeRbacProxyPullPolicy = &policy
-			}
-		}
-	}
 
 	tlsValues := map[string]interface{}{
 		"secretName": tlsSecretName,
 	}
 
-	kubeRbacProxyImageValues := map[string]interface{}{
-		"name": kubeRbacProxyImage,
-	}
-	if kubeRbacProxyPullPolicy != nil {
-		kubeRbacProxyImageValues["imagePullPolicy"] = *kubeRbacProxyPullPolicy
-	}
-
-	kubeRbacProxyValues := map[string]interface{}{
-		"enabled": kubeRbacProxyEnabled,
-		"image":   kubeRbacProxyImageValues,
-		"tls":     tlsValues,
-	}
-
-	if mlflow.Spec.KubeRbacProxy != nil && mlflow.Spec.KubeRbacProxy.Resources != nil {
-		kubeRbacProxyValues["resources"] = h.convertResources(mlflow.Spec.KubeRbacProxy.Resources)
-	}
-
-	values["kubeRbacProxy"] = kubeRbacProxyValues
+	values["tls"] = tlsValues
 
 	// Use config from environment variables as default, can be overridden by CR spec
 	mlflowImage := cfg.MLflowImage
@@ -275,8 +230,10 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 		artifactsDest = *mlflow.Spec.ArtifactsDestination
 	}
 
-	// DefaultArtifactRoot: if not specified, defaults to artifactsDestination
-	defaultArtifactRoot := artifactsDest
+	// DefaultArtifactRoot: only set if user explicitly specifies it. This is required when
+	// serveArtifacts is false.
+	// When unset, MLflow uses intelligent defaults when serveArtifacts is true:
+	var defaultArtifactRoot string
 	if mlflow.Spec.DefaultArtifactRoot != nil {
 		defaultArtifactRoot = *mlflow.Spec.DefaultArtifactRoot
 	}
@@ -304,9 +261,9 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 		"workspaceStoreUri":    "kubernetes://",
 		"serveArtifacts":       serveArtifacts,
 		"workers":              workers,
-		"port":                 9443,
+		"port":                 8443,
 		"allowedHosts":         allowedHosts,
-		"staticPrefix":         StaticPrefix, // Hardcoded for operator deployments (required for kube-rbac-proxy routing)
+		"staticPrefix":         StaticPrefix, // Hardcoded for operator deployments
 	}
 
 	// Add secret references if provided
@@ -373,7 +330,6 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 	values["service"] = map[string]interface{}{
 		"type":        "ClusterIP",
 		"port":        8443,
-		"directPort":  9443,
 		"annotations": serviceAnnotations,
 	}
 

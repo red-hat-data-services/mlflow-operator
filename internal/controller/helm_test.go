@@ -203,8 +203,8 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 			wantBackendStoreURI:      defaultBackendStoreURI,
 			wantRegistryStoreURI:     defaultBackendStoreURI, // Registry defaults to backend
 			wantArtifactsDestination: defaultArtifactsDest,
-			wantDefaultArtifactRoot:  defaultArtifactsDest, // Defaults to artifactsDestination
-			wantServeArtifacts:       false,                // Default is now false
+			wantDefaultArtifactRoot:  "", // Empty - let MLflow use its intelligent defaults
+			wantServeArtifacts:       false,
 			wantWorkers:              1,
 			wantBackendSecretRef:     false,
 			wantRegistrySecretRef:    false,
@@ -222,8 +222,8 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 			wantBackendStoreURI:      "postgresql://host/db",
 			wantRegistryStoreURI:     "postgresql://host/registry",
 			wantArtifactsDestination: "s3://bucket/artifacts",
-			wantDefaultArtifactRoot:  "s3://bucket/artifacts", // Defaults to artifactsDestination
-			wantServeArtifacts:       false,                   // Default is now false
+			wantDefaultArtifactRoot:  "", // Empty - let MLflow use its intelligent defaults
+			wantServeArtifacts:       false,
 			wantWorkers:              1,
 			wantBackendSecretRef:     false,
 			wantRegistrySecretRef:    false,
@@ -241,7 +241,7 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 			wantBackendStoreURI:      "postgresql://host/db",
 			wantRegistryStoreURI:     "postgresql://host/db", // Should default to backend
 			wantArtifactsDestination: "s3://bucket/artifacts",
-			wantDefaultArtifactRoot:  "s3://bucket/artifacts",
+			wantDefaultArtifactRoot:  "", // Empty - let MLflow use its intelligent defaults
 			wantServeArtifacts:       false,
 			wantWorkers:              1,
 			wantBackendSecretRef:     false,
@@ -259,7 +259,7 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 			wantBackendStoreURI:      defaultBackendStoreURI,
 			wantRegistryStoreURI:     defaultBackendStoreURI, // Registry defaults to backend
 			wantArtifactsDestination: defaultArtifactsDest,
-			wantDefaultArtifactRoot:  defaultArtifactsDest, // Defaults to artifactsDestination
+			wantDefaultArtifactRoot:  "", // Empty - let MLflow use its intelligent defaults
 			wantServeArtifacts:       false,
 			wantWorkers:              4,
 			wantBackendSecretRef:     false,
@@ -283,8 +283,8 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 			wantBackendStoreURI:      defaultBackendStoreURI, // Falls back to default when using secret ref
 			wantRegistryStoreURI:     defaultBackendStoreURI, // Registry defaults to backend
 			wantArtifactsDestination: defaultArtifactsDest,
-			wantDefaultArtifactRoot:  defaultArtifactsDest, // Defaults to artifactsDestination
-			wantServeArtifacts:       false,                // Default is now false
+			wantDefaultArtifactRoot:  "", // Empty - let MLflow use its intelligent defaults
+			wantServeArtifacts:       false,
 			wantWorkers:              1,
 			wantBackendSecretRef:     true,
 			wantRegistrySecretRef:    true,
@@ -304,8 +304,8 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 			wantBackendStoreURI:      defaultBackendStoreURI, // Direct value ignored when secret ref present
 			wantRegistryStoreURI:     defaultBackendStoreURI, // Registry defaults to backend
 			wantArtifactsDestination: defaultArtifactsDest,
-			wantDefaultArtifactRoot:  defaultArtifactsDest, // Defaults to artifactsDestination
-			wantServeArtifacts:       false,                // Default is now false
+			wantDefaultArtifactRoot:  "", // Empty - let MLflow use its intelligent defaults
+			wantServeArtifacts:       false,
 			wantWorkers:              1,
 			wantBackendSecretRef:     true,
 			wantRegistrySecretRef:    true, // Should inherit backend secret ref
@@ -1080,12 +1080,24 @@ func TestRenderChart(t *testing.T) {
 						if !hasAllowedHosts {
 							t.Error("--allowed-hosts not found in deployment args")
 						}
+
+						staticPrefixArg := "--static-prefix=" + StaticPrefix
+						hasStaticPrefixArg := false
+						for _, arg := range args {
+							if arg == staticPrefixArg {
+								hasStaticPrefixArg = true
+								break
+							}
+						}
+						if !hasStaticPrefixArg {
+							t.Errorf("%s not found in deployment args", staticPrefixArg)
+						}
 					}
 				}
 			},
 		},
 		{
-			name: "RBAC resources should use resourceSuffix naming pattern",
+			name: "RBAC resources should use static ClusterRole name and resourceSuffix for ClusterRoleBinding",
 			mlflow: &mlflowv1.MLflow{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "my-instance",
@@ -1100,7 +1112,9 @@ func TestRenderChart(t *testing.T) {
 			wantErr:   false,
 			validateObjs: func(t *testing.T, objs []*unstructured.Unstructured) {
 				expectedSuffix := "-my-instance"
-				expectedName := "mlflow" + expectedSuffix
+				expectedBindingName := "mlflow" + expectedSuffix
+				// ClusterRole is static (shared across all instances)
+				expectedClusterRoleName := "mlflow"
 
 				foundClusterRole := false
 				foundClusterRoleBinding := false
@@ -1109,21 +1123,21 @@ func TestRenderChart(t *testing.T) {
 					switch obj.GetKind() {
 					case "ClusterRole":
 						foundClusterRole = true
-						if obj.GetName() != expectedName {
-							t.Errorf("ClusterRole name = %s, want %s (should not include service account name)", obj.GetName(), expectedName)
+						if obj.GetName() != expectedClusterRoleName {
+							t.Errorf("ClusterRole name = %s, want %s (should be static, shared across all MLflow instances)", obj.GetName(), expectedClusterRoleName)
 						}
 					case "ClusterRoleBinding":
 						foundClusterRoleBinding = true
-						if obj.GetName() != expectedName {
-							t.Errorf("ClusterRoleBinding name = %s, want %s (should not include service account name)", obj.GetName(), expectedName)
+						if obj.GetName() != expectedBindingName {
+							t.Errorf("ClusterRoleBinding name = %s, want %s (should include resourceSuffix)", obj.GetName(), expectedBindingName)
 						}
-						// Verify it references the correct ClusterRole
+						// Verify it references the static ClusterRole
 						roleRef, found, err := unstructured.NestedString(obj.Object, "roleRef", "name")
 						if err != nil || !found {
 							t.Fatalf("Failed to get roleRef.name from ClusterRoleBinding: found=%v, err=%v", found, err)
 						}
-						if roleRef != expectedName {
-							t.Errorf("ClusterRoleBinding roleRef.name = %s, want %s", roleRef, expectedName)
+						if roleRef != expectedClusterRoleName {
+							t.Errorf("ClusterRoleBinding roleRef.name = %s, want %s", roleRef, expectedClusterRoleName)
 						}
 					}
 				}
@@ -1146,94 +1160,6 @@ func TestRenderChart(t *testing.T) {
 			}
 			if !tt.wantErr && tt.validateObjs != nil {
 				tt.validateObjs(t, objs)
-			}
-		})
-	}
-}
-
-func TestMlflowToHelmValues_KubeRbacProxyImage(t *testing.T) {
-	renderer := &HelmRenderer{}
-
-	tests := []struct {
-		name           string
-		mlflow         *mlflowv1.MLflow
-		wantEnabled    bool
-		wantName       string
-		wantPullPolicy string // empty string means pullPolicy should not be set
-		wantSecretName string
-	}{
-		{
-			name: "kube-rbac-proxy with default config",
-			mlflow: &mlflowv1.MLflow{
-				ObjectMeta: metav1.ObjectMeta{Name: "test"},
-				Spec:       mlflowv1.MLflowSpec{},
-			},
-			wantEnabled:    true, // Default is now true
-			wantPullPolicy: "",   // pullPolicy should not be set when not explicitly provided
-			wantSecretName: "mlflow-tls",
-		},
-		{
-			name: "kube-rbac-proxy enabled with custom image",
-			mlflow: &mlflowv1.MLflow{
-				ObjectMeta: metav1.ObjectMeta{Name: "test"},
-				Spec: mlflowv1.MLflowSpec{
-					KubeRbacProxy: &mlflowv1.KubeRbacProxyConfig{
-						Enabled: ptr(true),
-						Image: &mlflowv1.ImageConfig{
-							Image:           ptr("custom/proxy:v1.0.0"),
-							ImagePullPolicy: ptr(corev1.PullAlways),
-						},
-					},
-				},
-			},
-			wantEnabled:    true,
-			wantName:       "custom/proxy:v1.0.0",
-			wantPullPolicy: "Always",
-			wantSecretName: "mlflow-tls",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
-
-			kubeRbacProxy, ok := values["kubeRbacProxy"].(map[string]interface{})
-			if !ok {
-				t.Fatal("kubeRbacProxy not found in values or wrong type")
-			}
-
-			if got := kubeRbacProxy["enabled"].(bool); got != tt.wantEnabled {
-				t.Errorf("kubeRbacProxy.enabled = %v, want %v", got, tt.wantEnabled)
-			}
-
-			image, ok := kubeRbacProxy["image"].(map[string]interface{})
-			if !ok {
-				t.Fatal("kubeRbacProxy.image not found in values or wrong type")
-			}
-
-			if tt.wantName != "" {
-				if got := image["name"].(string); got != tt.wantName {
-					t.Errorf("kubeRbacProxy.image.name = %v, want %v", got, tt.wantName)
-				}
-			}
-
-			if tt.wantPullPolicy != "" {
-				if got, ok := image["imagePullPolicy"].(string); !ok || got != tt.wantPullPolicy {
-					t.Errorf("kubeRbacProxy.image.imagePullPolicy = %v, want %v", got, tt.wantPullPolicy)
-				}
-			} else {
-				if _, exists := image["imagePullPolicy"]; exists {
-					t.Errorf("kubeRbacProxy.image.imagePullPolicy should not be set but found: %v", image["imagePullPolicy"])
-				}
-			}
-
-			tls, ok := kubeRbacProxy["tls"].(map[string]interface{})
-			if !ok {
-				t.Fatal("kubeRbacProxy.tls not found in values or wrong type")
-			}
-
-			if got := tls["secretName"].(string); got != tt.wantSecretName {
-				t.Errorf("kubeRbacProxy.tls.secretName = %v, want %v", got, tt.wantSecretName)
 			}
 		})
 	}

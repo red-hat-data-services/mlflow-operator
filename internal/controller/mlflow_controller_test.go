@@ -28,11 +28,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	mlflowv1 "github.com/opendatahub-io/mlflow-operator/api/v1"
 )
 
 var _ = Describe("MLflow Controller", func() {
+	pgStoreURI := "postgresql://user:pass@host:5432/db"
+
 	Context("When reconciling a resource", func() {
 		const resourceName = "mlflow"
 
@@ -58,15 +61,15 @@ var _ = Describe("MLflow Controller", func() {
 			By("creating the custom resource for the Kind MLflow")
 			err = k8sClient.Get(ctx, typeNamespacedName, mlflow)
 			if err != nil && errors.IsNotFound(err) {
-				disabled := false
 				mlflowResource := &mlflowv1.MLflow{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: resourceName,
 					},
 					Spec: mlflowv1.MLflowSpec{
-						KubeRbacProxy: &mlflowv1.KubeRbacProxyConfig{
-							Enabled: &disabled,
-						},
+						DefaultArtifactRoot: func() *string {
+							val := "s3://default/artifacts"
+							return &val
+						}(),
 						// Storage is required when using default sqlite backend
 						Storage: &corev1.PersistentVolumeClaimSpec{
 							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -106,6 +109,107 @@ var _ = Describe("MLflow Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(reconcileErr).NotTo(HaveOccurred())
+		})
+
+		It("should create an HTTPRoute with API rewrite when available", func() {
+			By("Reconciling the created resource with HTTPRoute enabled")
+
+			controllerReconciler := &MLflowReconciler{
+				Client:               k8sClient,
+				Scheme:               k8sClient.Scheme(),
+				Namespace:            "opendatahub",
+				ChartPath:            "../../charts/mlflow",
+				ConsoleLinkAvailable: false,
+				HTTPRouteAvailable:   true,
+			}
+
+			_, reconcileErr := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(reconcileErr).NotTo(HaveOccurred())
+
+			httpRoute := &gatewayv1.HTTPRoute{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      ResourceName,
+				Namespace: controllerReconciler.Namespace,
+			}, httpRoute)).To(Succeed())
+
+			Expect(httpRoute.Spec.Rules).To(HaveLen(2))
+
+			apiRule := httpRoute.Spec.Rules[0]
+			Expect(apiRule.Matches).To(HaveLen(1))
+			Expect(apiRule.Matches[0].Path).NotTo(BeNil())
+			Expect(apiRule.Matches[0].Path.Value).NotTo(BeNil())
+			Expect(*apiRule.Matches[0].Path.Value).To(Equal("/" + ResourceName + "/api"))
+
+			Expect(apiRule.Filters).To(HaveLen(1))
+			Expect(apiRule.Filters[0].Type).To(Equal(gatewayv1.HTTPRouteFilterURLRewrite))
+			Expect(apiRule.Filters[0].URLRewrite).NotTo(BeNil())
+			Expect(apiRule.Filters[0].URLRewrite.Path).NotTo(BeNil())
+			Expect(apiRule.Filters[0].URLRewrite.Path.Type).To(Equal(gatewayv1.PrefixMatchHTTPPathModifier))
+			Expect(apiRule.Filters[0].URLRewrite.Path.ReplacePrefixMatch).NotTo(BeNil())
+			Expect(*apiRule.Filters[0].URLRewrite.Path.ReplacePrefixMatch).To(Equal("/api"))
+
+			Expect(apiRule.BackendRefs).To(HaveLen(1))
+			apiBackend := apiRule.BackendRefs[0]
+			Expect(apiBackend.BackendRef.BackendObjectReference.Name).To(Equal(gatewayv1.ObjectName(ResourceName)))
+			Expect(apiBackend.BackendRef.Port).NotTo(BeNil())
+			Expect(int(*apiBackend.BackendRef.Port)).To(Equal(8443))
+			Expect(apiBackend.BackendRef.Weight).NotTo(BeNil())
+			Expect(*apiBackend.BackendRef.Weight).To(Equal(int32(1)))
+
+			rootRule := httpRoute.Spec.Rules[1]
+			Expect(rootRule.Matches).To(HaveLen(1))
+			Expect(rootRule.Matches[0].Path).NotTo(BeNil())
+			Expect(rootRule.Matches[0].Path.Value).NotTo(BeNil())
+			Expect(*rootRule.Matches[0].Path.Value).To(Equal("/" + ResourceName))
+		})
+	})
+
+	Describe("CEL validation", func() {
+		const resourceName = "mlflow"
+		ctx := context.Background()
+
+		AfterEach(func() {
+			resource := &mlflowv1.MLflow{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName}, resource)
+			if errors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		})
+
+		It("rejects when serveArtifacts is false and defaultArtifactRoot is missing", func() {
+			serveArtifactsFalse := false
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					ServeArtifacts:   &serveArtifactsFalse,
+					BackendStoreURI:  &pgStoreURI,
+					RegistryStoreURI: &pgStoreURI,
+				},
+			}
+			err := k8sClient.Create(ctx, mlflow)
+			Expect(errors.IsInvalid(err)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("defaultArtifactRoot must be set"))
+		})
+
+		It("allows missing defaultArtifactRoot when serveArtifacts is true", func() {
+			serveArtifactsTrue := true
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					ServeArtifacts:   &serveArtifactsTrue,
+					BackendStoreURI:  &pgStoreURI,
+					RegistryStoreURI: &pgStoreURI,
+				},
+			}
+			Expect(k8sClient.Create(ctx, mlflow)).To(Succeed())
 		})
 	})
 })

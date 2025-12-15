@@ -109,7 +109,7 @@ func (r *MLflowReconciler) reconcileConsoleLink(ctx context.Context, mlflow *mlf
 	// Determine ConsoleLink name based on CR name
 	// If CR name is "mlflow", ConsoleLink name is "mlflow"
 	// Otherwise ConsoleLink name is "mlflow-${cr_name}"
-	consoleLinkName := "mlflow" + getResourceSuffix(mlflow.Name)
+	consoleLinkName := ResourceName + getResourceSuffix(mlflow.Name)
 
 	// Encode SVG icon to base64
 	iconBase64 := base64.StdEncoding.EncodeToString(consoleLinkIconSVG)
@@ -124,13 +124,13 @@ func (r *MLflowReconciler) reconcileConsoleLink(ctx context.Context, mlflow *mlf
 		ObjectMeta: metav1.ObjectMeta{
 			Name: consoleLinkName,
 			Labels: map[string]string{
-				"app": "mlflow",
+				"app": ResourceName,
 			},
 		},
 		Spec: consolev1.ConsoleLinkSpec{
 			Link: consolev1.Link{
 				Text: "MLflow",
-				Href: cfg.MLflowURL,
+				Href: fmt.Sprintf("%s/%s", cfg.MLflowURL, consoleLinkName),
 			},
 			Location: consolev1.ApplicationMenu,
 			ApplicationMenu: &consolev1.ApplicationMenuSpec{
@@ -170,9 +170,11 @@ func (r *MLflowReconciler) reconcileHttpRoute(ctx context.Context, mlflow *mlflo
 	// If CR name is "mlflow", HttpRoute name is "mlflow" and path prefix is "/mlflow"
 	// Otherwise HttpRoute name is "mlflow-${cr_name}" and path prefix is "/mlflow-${cr_name}"
 	suffix := getResourceSuffix(mlflow.Name)
-	httpRouteName := "mlflow" + suffix
-	pathPrefix := "/mlflow" + suffix
-	serviceName := "mlflow" + suffix
+	httpRouteName := ResourceName + suffix
+	pathPrefix := "/" + ResourceName + suffix
+	apiPathPrefix := pathPrefix + "/api"
+	replacePrefix := "/api"
+	serviceName := ResourceName + suffix
 
 	// Create HttpRoute object
 	pathMatchType := gatewayv1.PathMatchPathPrefix
@@ -189,7 +191,7 @@ func (r *MLflowReconciler) reconcileHttpRoute(ctx context.Context, mlflow *mlflo
 			Name:      httpRouteName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"app": "mlflow",
+				"app": ResourceName,
 			},
 		},
 		Spec: gatewayv1.HTTPRouteSpec{
@@ -202,6 +204,38 @@ func (r *MLflowReconciler) reconcileHttpRoute(ctx context.Context, mlflow *mlflo
 				},
 			},
 			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{
+							Path: &gatewayv1.HTTPPathMatch{
+								Type:  &pathMatchType,
+								Value: &apiPathPrefix,
+							},
+						},
+					},
+					Filters: []gatewayv1.HTTPRouteFilter{
+						{
+							Type: gatewayv1.HTTPRouteFilterURLRewrite,
+							URLRewrite: &gatewayv1.HTTPURLRewriteFilter{
+								Path: &gatewayv1.HTTPPathModifier{
+									Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+									ReplacePrefixMatch: &replacePrefix,
+								},
+							},
+						},
+					},
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: gatewayv1.ObjectName(serviceName),
+									Port: &servicePort,
+								},
+								Weight: &weight,
+							},
+						},
+					},
+				},
 				{
 					Matches: []gatewayv1.HTTPRouteMatch{
 						{

@@ -22,6 +22,7 @@ import (
 )
 
 // MLflowSpec defines the desired state of MLflow
+// +kubebuilder:validation:XValidation:rule="has(self.defaultArtifactRoot) || (has(self.serveArtifacts) && self.serveArtifacts)",message="defaultArtifactRoot must be set when serveArtifacts is not true"
 // +kubebuilder:validation:XValidation:rule="!has(self.defaultArtifactRoot) || !self.defaultArtifactRoot.startsWith('file://') || (has(self.serveArtifacts) && self.serveArtifacts)",message="serveArtifacts must be enabled when defaultArtifactRoot uses file-based storage (file:// prefix)"
 // +kubebuilder:validation:XValidation:rule="!(has(self.backendStoreUri) && has(self.backendStoreUriFrom))",message="backendStoreUri and backendStoreUriFrom are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!(has(self.registryStoreUri) && has(self.registryStoreUriFrom))",message="registryStoreUri and registryStoreUriFrom are mutually exclusive"
@@ -30,10 +31,6 @@ import (
 // +kubebuilder:validation:XValidation:rule="!has(self.artifactsDestination) || !self.artifactsDestination.startsWith('file://') || has(self.storage)",message="storage must be configured when artifactsDestination uses file-based storage (file:// prefix)"
 // +kubebuilder:validation:XValidation:rule="!has(self.artifactsDestination) || !self.artifactsDestination.startsWith('file://') || (has(self.serveArtifacts) && self.serveArtifacts)",message="serveArtifacts must be enabled when artifactsDestination uses file-based storage (file:// prefix)"
 type MLflowSpec struct {
-	// KubeRbacProxy specifies the kube-rbac-proxy sidecar configuration
-	// +optional
-	KubeRbacProxy *KubeRbacProxyConfig `json:"kubeRbacProxy,omitempty"`
-
 	// Image specifies the MLflow container image.
 	// If not specified, use the default image
 	// via the MLFLOW_IMAGE environment variable in the operator.
@@ -123,9 +120,8 @@ type MLflowSpec struct {
 	// +optional
 	ArtifactsDestination *string `json:"artifactsDestination,omitempty"`
 
-	// DefaultArtifactRoot is the default artifact root path for MLflow runs.
-	// This is used when a run doesn't specify an artifact location.
-	// If not specified, defaults to artifactsDestination value.
+	// DefaultArtifactRoot is the default artifact root path for MLflow runs on the server.
+	// This is required when serveArtifacts is false.
 	// Supported schemes: file://, s3://, gs://, wasbs://, hdfs://, etc.
 	// Examples:
 	//   - "s3://my-bucket/mlflow/artifacts"
@@ -186,24 +182,6 @@ type MLflowSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
-// KubeRbacProxyConfig contains kube-rbac-proxy sidecar configuration
-type KubeRbacProxyConfig struct {
-	// Enabled determines whether kube-rbac-proxy sidecar should be deployed
-	// Defaults to true
-	// +kubebuilder:default=true
-	// +optional
-	Enabled *bool `json:"enabled,omitempty"`
-
-	// Image specifies the kube-rbac-proxy container image configuration.
-	// +optional
-	Image *ImageConfig `json:"image,omitempty"`
-
-	// Resources specifies the compute resources for the kube-rbac-proxy container.
-	// If not specified, defaults to: requests(cpu: 100m, memory: 256Mi), limits(cpu: 100m, memory: 256Mi)
-	// +optional
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-}
-
 // ImageConfig contains container image configuration
 type ImageConfig struct {
 	// Image is the container image (includes tag)
@@ -219,7 +197,6 @@ type ImageConfig struct {
 
 // MLflowStatus defines the observed state of MLflow.
 type MLflowStatus struct {
-
 	// conditions represent the current state of the MLflow resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//

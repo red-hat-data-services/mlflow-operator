@@ -17,22 +17,14 @@ limitations under the License.
 package controller
 
 const (
+	// ResourceName is the base name used for MLflow resources (deployments, services, etc.)
+	ResourceName = "mlflow"
+	// ClusterRoleName is the name of the shared ClusterRole used by all MLflow instances
+	ClusterRoleName = "mlflow"
 	// ServiceAccountName is the name of the service account for MLflow deployments
 	ServiceAccountName = "mlflow-sa"
-	// TLSSecretName is the default name for the TLS secret used by kube-rbac-proxy
+	// TLSSecretName is the default name for the TLS secret used by the MLflow server
 	TLSSecretName = "mlflow-tls"
-	// StaticPrefix is the URL prefix for MLflow when deployed via the operator (required for kube-rbac-proxy routing)
+	// StaticPrefix is the URL prefix for MLflow when deployed via the operator
 	StaticPrefix = "/mlflow"
 )
-
-// getClusterRoleName returns the ClusterRole name for a given MLflow instance.
-// Pattern: mlflow-sa-mlflow{{ suffix }}
-func getClusterRoleName(mlflowName string) string {
-	return "mlflow" + getResourceSuffix(mlflowName)
-}
-
-// getClusterRoleBindingName returns the ClusterRoleBinding name for a given MLflow instance.
-// Pattern: mlflow-sa-mlflow{{ suffix }}
-func getClusterRoleBindingName(mlflowName string) string {
-	return "mlflow" + getResourceSuffix(mlflowName)
-}
