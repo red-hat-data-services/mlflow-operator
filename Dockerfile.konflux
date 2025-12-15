@@ -1,0 +1,45 @@
+# Build the manager binary
+FROM registry.access.redhat.com/ubi9/go-toolset@sha256:56fc8480721e5febbd2b6810199a63b5b68c3c5ab826d082c8247054a1dc33e7 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+USER root
+
+WORKDIR /workspace
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# Copy the API module (required for replace directive in go.mod)
+COPY api/go.mod api/go.mod
+COPY api/go.sum api/go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the Go source (relies on .dockerignore to filter)
+COPY . .
+
+# Build
+# the GOARCH has no default value to allow the binary to be built according to the host where the command
+# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
+# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
+# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GO111MODULE=on GOEXPERIMENT=strictfipsruntime go build -tags strictfipsruntime -a -o manager cmd/main.go
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:6fc28bcb6776e387d7a35a2056d9d2b985dc4e26031e98a2bd35a7137cd6fd71
+WORKDIR /
+COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/charts/mlflow charts/mlflow
+
+USER 1001
+ENTRYPOINT ["/manager"]
+
+LABEL com.redhat.component="odh-mlflow-operator-rhel9" \
+      name="rhoai/odh-mlflow-operator-rhel9" \
+      description="odh-mlflow-operator-rhel9" \
+      summary="odh-mlflow-operator-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-mlflow-operator-rhel9" \
+      io.k8s.description="odh-mlflow-operator-rhel9" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
