@@ -6,7 +6,7 @@ require github.com/opendatahub-io/mlflow-operator/api v0.0.0
 
 require (
 	github.com/onsi/ginkgo/v2 v2.27.2
-	github.com/onsi/gomega v1.38.2
+	github.com/onsi/gomega v1.39.0
 	github.com/openshift/api v0.0.0-20251208101024-c2a41ea924bd
 	github.com/spf13/viper v1.21.0
 	helm.sh/helm/v3 v3.19.2
