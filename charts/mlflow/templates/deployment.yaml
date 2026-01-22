@@ -1,3 +1,4 @@
+{{- $healthPrefix := .Values.mlflow.staticPrefix | trimSuffix "/" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -97,6 +98,10 @@ spec:
             - --static-prefix={{ .Values.mlflow.staticPrefix }}
             {{- end }}
           env:
+            - name: MLFLOW_DISABLE_TELEMETRY
+              value: "true"
+            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+              value: "false"
             - name: MLFLOW_BACKEND_STORE_URI
               {{- if .Values.mlflow.backendStoreUriFrom }}
               valueFrom:
@@ -141,7 +146,7 @@ spec:
               readOnly: true
           livenessProbe:
             httpGet:
-              path: /health
+              path: {{ printf "%s/health" $healthPrefix }}
               port: https
               scheme: HTTPS
             initialDelaySeconds: 30
@@ -151,7 +156,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: {{ printf "%s/health" $healthPrefix }}
               port: https
               scheme: HTTPS
             initialDelaySeconds: 5
