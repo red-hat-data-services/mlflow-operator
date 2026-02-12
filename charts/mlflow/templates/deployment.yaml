@@ -64,6 +64,62 @@ spec:
           secret:
             secretName: {{ .Values.tls.secretName }}
             defaultMode: 420
+        {{- if .Values.caBundle.configMaps }}
+        # CA bundle ConfigMap volumes
+        {{- range $i, $cm := .Values.caBundle.configMaps }}
+        - name: ca-bundle-{{ $i }}
+          configMap:
+            name: {{ $cm.name }}
+            optional: true
+        {{- end }}
+        # Combined CA bundle output volume
+        - name: combined-ca-bundle
+          emptyDir: {}
+        {{- end }}
+
+      {{- if .Values.caBundle.configMaps }}
+      # Init container that creates initial combined CA bundle
+      initContainers:
+        - name: combine-ca-bundles
+          image: {{ .Values.image.name }}
+          {{- if .Values.image.imagePullPolicy }}
+          imagePullPolicy: {{ .Values.image.imagePullPolicy }}
+          {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+{{ include "mlflow.caBundleFunctions" . | indent 14 }}
+              combine_ca_bundles
+          env:
+            - name: CA_BUNDLE_FILE_PATHS
+              value: {{ include "mlflow.caBundleFilePaths" . | quote }}
+            - name: CA_BUNDLE_MOUNT_PATHS
+              value: {{ include "mlflow.caBundleMountPaths" . | quote }}
+            - name: CA_BUNDLE_OUTPUT
+              value: {{ .Values.caBundle.outputPath | quote }}
+          volumeMounts:
+            - name: combined-ca-bundle
+              mountPath: {{ dir .Values.caBundle.outputPath }}
+            {{- range $i, $cm := .Values.caBundle.configMaps }}
+            - name: ca-bundle-{{ $i }}
+              mountPath: {{ $cm.mountPath }}
+              readOnly: true
+            {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      {{- end }}
+
       containers:
         - name: mlflow
           image: {{ .Values.image.name }}
@@ -129,6 +185,31 @@ spec:
               value: {{ .value | quote }}
               {{- end }}
             {{- end }}
+            {{- if .Values.caBundle.configMaps }}
+            # CA bundle environment variables - point various libraries to the combined CA bundle
+            - name: SSL_CERT_FILE
+              value: {{ .Values.caBundle.outputPath | quote }}
+            # REQUESTS_CA_BUNDLE: requests library used by MLflow
+            - name: REQUESTS_CA_BUNDLE
+              value: {{ .Values.caBundle.outputPath | quote }}
+            # CURL_CA_BUNDLE: fallback for requests/pycurl
+            - name: CURL_CA_BUNDLE
+              value: {{ .Values.caBundle.outputPath | quote }}
+            # AWS_CA_BUNDLE: boto3/botocore for S3 storage
+            - name: AWS_CA_BUNDLE
+              value: {{ .Values.caBundle.outputPath | quote }}
+            # PGSSLROOTCERT/PGSSLMODE: psycopg2 PostgreSQL SSL configuration
+            - name: PGSSLROOTCERT
+              value: {{ .Values.caBundle.outputPath | quote }}
+            - name: PGSSLMODE
+              value: "verify-full"
+            # MLFLOW_MYSQL_CA: MySQL CA bundle for MySQL backend
+            - name: MLFLOW_MYSQL_CA
+              value: {{ .Values.caBundle.outputPath | quote }}
+            # MLFLOW_S3_IGNORE_TLS: Require TLS verification for S3 storage
+            - name: MLFLOW_S3_IGNORE_TLS
+              value: "false"
+            {{- end }}
           {{- if .Values.envFrom }}
           envFrom:
             {{- toYaml .Values.envFrom | nindent 12 }}
@@ -144,6 +225,13 @@ spec:
             - name: mlflow-tls
               mountPath: /etc/tls/private
               readOnly: true
+            {{- if .Values.caBundle.configMaps }}
+            # Combined CA bundle - includes system CAs + platform CAs + custom CAs
+            # Created by the init container, used by all Python libraries
+            - name: combined-ca-bundle
+              mountPath: {{ dir .Values.caBundle.outputPath }}
+              readOnly: true
+            {{- end }}
           livenessProbe:
             httpGet:
               path: {{ printf "%s/health" $healthPrefix }}
@@ -172,3 +260,68 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+
+        {{- if .Values.caBundle.configMaps }}
+        # Sidecar that watches for CA bundle ConfigMap changes and regenerates the combined bundle
+        - name: ca-bundle-watcher
+          image: {{ .Values.image.name }}
+          {{- if .Values.image.imagePullPolicy }}
+          imagePullPolicy: {{ .Values.image.imagePullPolicy }}
+          {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+{{ include "mlflow.caBundleFunctions" . | indent 14 }}
+
+              # Watch loop
+              LAST_CHECKSUM=$(compute_checksum)
+              echo "CA bundle watcher started"
+              echo "  File paths: $CA_BUNDLE_FILE_PATHS"
+              echo "  Mount paths: $CA_BUNDLE_MOUNT_PATHS"
+              echo "  Output: $CA_BUNDLE_OUTPUT"
+              echo "  Watch interval: ${CA_BUNDLE_WATCH_INTERVAL}s"
+              echo "  Initial checksum: $LAST_CHECKSUM"
+
+              while true; do
+                sleep "$CA_BUNDLE_WATCH_INTERVAL"
+                CURRENT_CHECKSUM=$(compute_checksum)
+                if [ "$CURRENT_CHECKSUM" != "$LAST_CHECKSUM" ]; then
+                  echo "CA bundle change detected (checksum: $LAST_CHECKSUM -> $CURRENT_CHECKSUM)"
+                  if combine_ca_bundles; then
+                    LAST_CHECKSUM="$CURRENT_CHECKSUM"
+                    echo "Combined CA bundle updated successfully"
+                  else
+                    echo "ERROR: Failed to regenerate combined CA bundle"
+                  fi
+                fi
+              done
+          env:
+            - name: CA_BUNDLE_WATCH_INTERVAL
+              value: "{{ .Values.caBundle.watchInterval | default 30 }}"
+            - name: CA_BUNDLE_FILE_PATHS
+              value: {{ include "mlflow.caBundleFilePaths" . | quote }}
+            - name: CA_BUNDLE_MOUNT_PATHS
+              value: {{ include "mlflow.caBundleMountPaths" . | quote }}
+            - name: CA_BUNDLE_OUTPUT
+              value: {{ .Values.caBundle.outputPath | quote }}
+          volumeMounts:
+            - name: combined-ca-bundle
+              mountPath: {{ dir .Values.caBundle.outputPath }}
+            {{- range $i, $cm := .Values.caBundle.configMaps }}
+            - name: ca-bundle-{{ $i }}
+              mountPath: {{ $cm.mountPath }}
+              readOnly: true
+            {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+        {{- end }}
