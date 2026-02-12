@@ -19,6 +19,8 @@ package controller
 import (
 	"testing"
 
+	"github.com/onsi/gomega"   // nolint:staticcheck // Named import for gomega.NewWithT; dual import for readability
+	. "github.com/onsi/gomega" // Dot import for matchers like HaveOccurred
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +31,10 @@ import (
 
 const (
 	deploymentKind = "Deployment"
+
+	// CA bundle test constants - these match values from values.yaml and deployment.yaml
+	caCombinedVolume = "combined-ca-bundle"
+	caCombinedBundle = "/etc/pki/tls/certs/combined/ca-bundle.crt"
 )
 
 func TestMlflowToHelmValues_Storage(t *testing.T) {
@@ -91,7 +97,10 @@ func TestMlflowToHelmValues_Storage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
+
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			storage, ok := values["storage"].(map[string]interface{})
 			if !ok {
@@ -153,7 +162,10 @@ func TestMlflowToHelmValues_Image(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
+
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			image, ok := values["image"].(map[string]interface{})
 			if !ok {
@@ -332,7 +344,10 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
+
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			mlflowConfig, ok := values["mlflow"].(map[string]interface{})
 			if !ok {
@@ -394,6 +409,8 @@ func TestMlflowToHelmValues_MLflowConfig(t *testing.T) {
 }
 
 func TestMlflowToHelmValues_StaticPrefix(t *testing.T) {
+	g := gomega.NewWithT(t)
+
 	renderer := &HelmRenderer{}
 
 	mlflow := &mlflowv1.MLflow{
@@ -401,7 +418,8 @@ func TestMlflowToHelmValues_StaticPrefix(t *testing.T) {
 		Spec:       mlflowv1.MLflowSpec{},
 	}
 
-	values := renderer.mlflowToHelmValues(mlflow, "test-namespace")
+	values, err := renderer.mlflowToHelmValues(mlflow, "test-namespace", RenderOptions{})
+	g.Expect(err).NotTo(HaveOccurred())
 
 	mlflowConfig, ok := values["mlflow"].(map[string]interface{})
 	if !ok {
@@ -482,9 +500,12 @@ func TestMlflowToHelmValues_Env(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
 
-			env, ok := values["env"].([]map[string]interface{})
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
+
+			env, ok := values["env"].([]any)
 			if !ok {
 				t.Fatal("env not found in values or wrong type")
 			}
@@ -497,10 +518,11 @@ func TestMlflowToHelmValues_Env(t *testing.T) {
 			if tt.wantEnvName != "" {
 				found := false
 				for _, e := range env {
-					if e["name"] == tt.wantEnvName {
+					envMap := e.(map[string]any)
+					if envMap["name"] == tt.wantEnvName {
 						found = true
-						if e["value"] != tt.wantEnvVal {
-							t.Errorf("env[%s] = %v, want %v", tt.wantEnvName, e["value"], tt.wantEnvVal)
+						if envMap["value"] != tt.wantEnvVal {
+							t.Errorf("env[%s] = %v, want %v", tt.wantEnvName, envMap["value"], tt.wantEnvVal)
 						}
 						break
 					}
@@ -558,7 +580,10 @@ func TestMlflowToHelmValues_EnvFrom(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
+
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			if tt.wantEnvFromCount == 0 {
 				if _, exists := values["envFrom"]; exists {
@@ -567,7 +592,7 @@ func TestMlflowToHelmValues_EnvFrom(t *testing.T) {
 				return
 			}
 
-			envFrom, ok := values["envFrom"].([]map[string]interface{})
+			envFrom, ok := values["envFrom"].([]any)
 			if !ok {
 				t.Fatal("envFrom not found in values or wrong type")
 			}
@@ -626,7 +651,10 @@ func TestMlflowToHelmValues_Resources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
+
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			resources, ok := values["resources"].(map[string]interface{})
 			if !tt.wantResourcesSet {
@@ -689,7 +717,10 @@ func TestMlflowToHelmValues_Replicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			values := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace")
+			g := gomega.NewWithT(t)
+
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			if got := values["replicaCount"].(int32); got != tt.wantReplicas {
 				t.Errorf("replicaCount = %v, want %v", got, tt.wantReplicas)
@@ -699,6 +730,7 @@ func TestMlflowToHelmValues_Replicas(t *testing.T) {
 }
 
 func TestMlflowToHelmValues_Namespace(t *testing.T) {
+	g := gomega.NewWithT(t)
 	renderer := &HelmRenderer{}
 
 	mlflow := &mlflowv1.MLflow{
@@ -707,7 +739,8 @@ func TestMlflowToHelmValues_Namespace(t *testing.T) {
 	}
 
 	testNamespace := "custom-namespace"
-	values := renderer.mlflowToHelmValues(mlflow, testNamespace)
+	values, err := renderer.mlflowToHelmValues(mlflow, testNamespace, RenderOptions{})
+	g.Expect(err).NotTo(HaveOccurred())
 
 	if got := values["namespace"].(string); got != testNamespace {
 		t.Errorf("namespace = %v, want %v", got, testNamespace)
@@ -741,102 +774,17 @@ func TestMlflowToHelmValues_ResourceSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
 			mlflow := &mlflowv1.MLflow{
 				ObjectMeta: metav1.ObjectMeta{Name: tt.crName},
 				Spec:       mlflowv1.MLflowSpec{},
 			}
 
-			values := renderer.mlflowToHelmValues(mlflow, "test-namespace")
+			values, err := renderer.mlflowToHelmValues(mlflow, "test-namespace", RenderOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
 
 			if got := values["resourceSuffix"].(string); got != tt.wantResourceSuffix {
 				t.Errorf("resourceSuffix = %v, want %v", got, tt.wantResourceSuffix)
-			}
-		})
-	}
-}
-
-func TestConvertResources(t *testing.T) {
-	renderer := &HelmRenderer{}
-
-	tests := []struct {
-		name      string
-		resources *corev1.ResourceRequirements
-		wantKeys  []string
-	}{
-		{
-			name: "resources with requests and limits",
-			resources: &corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("100m"),
-					corev1.ResourceMemory: resource.MustParse("256Mi"),
-				},
-				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("500m"),
-					corev1.ResourceMemory: resource.MustParse("1Gi"),
-				},
-			},
-			wantKeys: []string{"requests", "limits"},
-		},
-		{
-			name: "resources with only requests",
-			resources: &corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("100m"),
-				},
-			},
-			wantKeys: []string{"requests"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := renderer.convertResources(tt.resources)
-
-			for _, key := range tt.wantKeys {
-				if _, exists := result[key]; !exists {
-					t.Errorf("expected key %s not found in result", key)
-				}
-			}
-		})
-	}
-}
-
-func TestConvertEnvVarSource(t *testing.T) {
-	renderer := &HelmRenderer{}
-
-	tests := []struct {
-		name   string
-		source *corev1.EnvVarSource
-		want   string // Expected key in result
-	}{
-		{
-			name: "secretKeyRef",
-			source: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "my-secret"},
-					Key:                  "password",
-				},
-			},
-			want: "secretKeyRef",
-		},
-		{
-			name: "configMapKeyRef",
-			source: &corev1.EnvVarSource{
-				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "my-config"},
-					Key:                  "config-key",
-				},
-			},
-			want: "configMapKeyRef",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := renderer.convertEnvVarSource(tt.source)
-
-			if _, exists := result[tt.want]; !exists {
-				t.Errorf("expected key %s not found in result", tt.want)
 			}
 		})
 	}
@@ -876,7 +824,7 @@ func TestRenderChart_EnvVars(t *testing.T) {
 		},
 	}
 
-	objs, err := renderer.RenderChart(mlflow, "test-ns")
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{})
 	if err != nil {
 		t.Fatalf("RenderChart() error = %v", err)
 	}
@@ -1200,7 +1148,7 @@ func TestRenderChart(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objs, err := renderer.RenderChart(tt.mlflow, tt.namespace)
+			objs, err := renderer.RenderChart(tt.mlflow, tt.namespace, RenderOptions{})
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("RenderChart() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1208,6 +1156,355 @@ func TestRenderChart(t *testing.T) {
 				tt.validateObjs(t, objs)
 			}
 		})
+	}
+}
+
+func TestMlflowToHelmValues_CABundle(t *testing.T) {
+	renderer := &HelmRenderer{}
+
+	// Test: no CA bundles configured
+	values, err := renderer.mlflowToHelmValues(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}, "test-ns", RenderOptions{PlatformTrustedCABundleExists: false})
+	if err != nil {
+		t.Fatalf("mlflowToHelmValues() error = %v", err)
+	}
+
+	// caBundle should have empty configMaps when no CA bundles are configured
+	caBundle := values["caBundle"].(map[string]interface{})
+	configMaps := caBundle["configMaps"].([]map[string]interface{})
+	if len(configMaps) != 0 {
+		t.Errorf("caBundle.configMaps should be empty, got %d", len(configMaps))
+	}
+
+	// filePaths should always include the system CA path
+	filePaths := caBundle["filePaths"].([]string)
+	if len(filePaths) != 1 || filePaths[0] != systemCAPath {
+		t.Errorf("caBundle.filePaths should be [%s], got %v", systemCAPath, filePaths)
+	}
+
+	// Test: user-provided CA bundle only
+	values, err = renderer.mlflowToHelmValues(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			CABundleConfigMap: &mlflowv1.CABundleConfigMapSpec{Name: "my-ca"},
+		},
+	}, "test-ns", RenderOptions{PlatformTrustedCABundleExists: false})
+	if err != nil {
+		t.Fatalf("mlflowToHelmValues() error = %v", err)
+	}
+
+	caBundle = values["caBundle"].(map[string]interface{})
+	configMaps = caBundle["configMaps"].([]map[string]interface{})
+	if len(configMaps) != 1 {
+		t.Fatalf("caBundle.configMaps should have 1 entry, got %d", len(configMaps))
+	}
+	if configMaps[0]["name"].(string) != "my-ca" {
+		t.Errorf("configMaps[0].name = %v, want my-ca", configMaps[0]["name"])
+	}
+	if configMaps[0]["mountPath"].(string) != caCustomMount {
+		t.Errorf("configMaps[0].mountPath = %v, want %v", configMaps[0]["mountPath"], caCustomMount)
+	}
+
+	// Test: ODH CA bundle only (no user-provided)
+	values, err = renderer.mlflowToHelmValues(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}, "test-ns", RenderOptions{PlatformTrustedCABundleExists: true})
+	if err != nil {
+		t.Fatalf("mlflowToHelmValues() error = %v", err)
+	}
+
+	caBundle = values["caBundle"].(map[string]interface{})
+	configMaps = caBundle["configMaps"].([]map[string]interface{})
+	if len(configMaps) != 1 {
+		t.Fatalf("caBundle.configMaps should have 1 entry, got %d", len(configMaps))
+	}
+	if configMaps[0]["name"].(string) != PlatformTrustedCABundleConfigMapName {
+		t.Errorf("configMaps[0].name = %v, want %v", configMaps[0]["name"], PlatformTrustedCABundleConfigMapName)
+	}
+	if configMaps[0]["mountPath"].(string) != caPlatformMount {
+		t.Errorf("configMaps[0].mountPath = %v, want %v", configMaps[0]["mountPath"], caPlatformMount)
+	}
+
+	// Test: both CA bundles enabled - combined bundle has both ConfigMaps
+	values, err = renderer.mlflowToHelmValues(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			CABundleConfigMap: &mlflowv1.CABundleConfigMapSpec{Name: "my-ca"},
+		},
+	}, "test-ns", RenderOptions{PlatformTrustedCABundleExists: true})
+	if err != nil {
+		t.Fatalf("mlflowToHelmValues() error = %v", err)
+	}
+
+	caBundle = values["caBundle"].(map[string]interface{})
+	configMaps = caBundle["configMaps"].([]map[string]interface{})
+	if len(configMaps) != 2 {
+		t.Fatalf("caBundle.configMaps should have 2 entries, got %d", len(configMaps))
+	}
+	// Platform CA should be first
+	if configMaps[0]["name"].(string) != PlatformTrustedCABundleConfigMapName {
+		t.Errorf("configMaps[0].name = %v, want %v", configMaps[0]["name"], PlatformTrustedCABundleConfigMapName)
+	}
+	// Custom CA should be second
+	if configMaps[1]["name"].(string) != "my-ca" {
+		t.Errorf("configMaps[1].name = %v, want my-ca", configMaps[1]["name"])
+	}
+}
+
+func TestRenderChart_CABundle(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	// Test with both CA bundles enabled - the most comprehensive case
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			CABundleConfigMap: &mlflowv1.CABundleConfigMapSpec{Name: "my-ca"},
+		},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{PlatformTrustedCABundleExists: true})
+	if err != nil {
+		t.Fatalf("RenderChart() error = %v", err)
+	}
+
+	// Find the Deployment
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("Deployment not found")
+	}
+
+	// Check init container exists for combining CA bundles
+	initContainers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "initContainers")
+	if len(initContainers) == 0 {
+		t.Fatal("init containers not found - should have combine-ca-bundles init container")
+	}
+	initContainer := initContainers[0].(map[string]interface{})
+	if initContainer["name"].(string) != "combine-ca-bundles" {
+		t.Errorf("init container name = %v, want combine-ca-bundles", initContainer["name"])
+	}
+
+	// Check all CA bundle-related env vars exist
+	containers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	container := containers[0].(map[string]interface{})
+	envVars, _, _ := unstructured.NestedSlice(container, "env")
+
+	// These are all the env vars that should be set when CA bundles are enabled
+	requiredEnvVars := []string{
+		"SSL_CERT_FILE",      // Python ssl module, OpenSSL, httpx
+		"REQUESTS_CA_BUNDLE", // requests library
+		"CURL_CA_BUNDLE",     // pycurl fallback
+		"AWS_CA_BUNDLE",      // boto3/botocore for S3
+		"PGSSLROOTCERT",      // psycopg2 for PostgreSQL
+	}
+
+	foundEnvVars := make(map[string]string)
+	for _, env := range envVars {
+		envMap := env.(map[string]interface{})
+		name := envMap["name"].(string)
+		if value, ok := envMap["value"].(string); ok {
+			foundEnvVars[name] = value
+		}
+	}
+
+	for _, required := range requiredEnvVars {
+		if _, found := foundEnvVars[required]; !found {
+			t.Errorf("required env var %s not found", required)
+		}
+	}
+
+	// Verify file-based env vars point to combined CA bundle (includes system + ODH + user CAs)
+	expectedFilePath := caCombinedBundle
+	fileBasedEnvVars := []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "AWS_CA_BUNDLE", "PGSSLROOTCERT"}
+	for _, envName := range fileBasedEnvVars {
+		if foundEnvVars[envName] != expectedFilePath {
+			t.Errorf("%s = %v, want %v", envName, foundEnvVars[envName], expectedFilePath)
+		}
+	}
+
+	// Verify PGSSLMODE is set to verify-full for security
+	if foundEnvVars["PGSSLMODE"] != "verify-full" {
+		t.Errorf("PGSSLMODE = %v, want verify-full", foundEnvVars["PGSSLMODE"])
+	}
+
+	// Check combined-ca-bundle volume mount exists on main container
+	volumeMounts, _, _ := unstructured.NestedSlice(container, "volumeMounts")
+	foundCombined := false
+	for _, vm := range volumeMounts {
+		name := vm.(map[string]interface{})["name"].(string)
+		if name == caCombinedVolume {
+			foundCombined = true
+		}
+	}
+	if !foundCombined {
+		t.Errorf("%s volume mount not found on main container", caCombinedVolume)
+	}
+
+	// Check that init container has all required volume mounts for combining bundles
+	// With the new structure, volume names are ca-bundle-0 (platform) and ca-bundle-1 (custom)
+	initVolumeMounts, _, _ := unstructured.NestedSlice(initContainer, "volumeMounts")
+	foundInitCombined := false
+	caVolumeCount := 0
+	for _, vm := range initVolumeMounts {
+		name := vm.(map[string]interface{})["name"].(string)
+		if name == caCombinedVolume {
+			foundInitCombined = true
+		}
+		if len(name) > 10 && name[:10] == "ca-bundle-" {
+			caVolumeCount++
+		}
+	}
+	if !foundInitCombined {
+		t.Errorf("init container: %s volume mount not found", caCombinedVolume)
+	}
+	if caVolumeCount != 2 {
+		t.Errorf("init container: expected 2 ca-bundle-* volume mounts, got %d", caVolumeCount)
+	}
+
+	// Check volumes exist including combined-ca-bundle emptyDir
+	volumes, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "volumes")
+	foundCombinedVolume := false
+	for _, vol := range volumes {
+		volMap := vol.(map[string]interface{})
+		name := volMap["name"].(string)
+		if name == caCombinedVolume {
+			foundCombinedVolume = true
+			// Should be an emptyDir
+			if _, ok := volMap["emptyDir"]; !ok {
+				t.Errorf("%s volume should be an emptyDir", caCombinedVolume)
+			}
+		}
+		// Check CA ConfigMap volumes have optional: true
+		if len(name) > 10 && name[:10] == "ca-bundle-" {
+			configMap, _, _ := unstructured.NestedMap(volMap, "configMap")
+			if optional, ok := configMap["optional"].(bool); !ok || !optional {
+				t.Errorf("volume %s should have optional: true", name)
+			}
+		}
+	}
+	if !foundCombinedVolume {
+		t.Errorf("%s volume not found", caCombinedVolume)
+	}
+}
+
+func TestRenderChart_CABundle_ODHOnly(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	// Test with only ODH CA bundle (no user-provided)
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{PlatformTrustedCABundleExists: true})
+	if err != nil {
+		t.Fatalf("RenderChart() error = %v", err)
+	}
+
+	// Find the Deployment
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("Deployment not found")
+	}
+
+	// Check init container exists
+	initContainers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "initContainers")
+	if len(initContainers) == 0 {
+		t.Fatal("init containers not found")
+	}
+
+	containers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	container := containers[0].(map[string]interface{})
+	envVars, _, _ := unstructured.NestedSlice(container, "env")
+
+	foundEnvVars := make(map[string]string)
+	for _, env := range envVars {
+		envMap := env.(map[string]interface{})
+		name := envMap["name"].(string)
+		if value, ok := envMap["value"].(string); ok {
+			foundEnvVars[name] = value
+		}
+	}
+
+	// Verify file-based env vars point to combined CA bundle
+	expectedFilePath := caCombinedBundle
+	fileBasedEnvVars := []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE", "PGSSLROOTCERT"}
+	for _, envName := range fileBasedEnvVars {
+		if foundEnvVars[envName] != expectedFilePath {
+			t.Errorf("%s = %v, want %v", envName, foundEnvVars[envName], expectedFilePath)
+		}
+	}
+}
+
+func TestRenderChart_NoCABundle(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	// Test with no CA bundles configured
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{PlatformTrustedCABundleExists: false})
+	if err != nil {
+		t.Fatalf("RenderChart() error = %v", err)
+	}
+
+	// Find the Deployment
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("Deployment not found")
+	}
+
+	// Check no init containers exist when CA bundles are not configured
+	initContainers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "initContainers")
+	if len(initContainers) > 0 {
+		t.Error("init containers should not exist when no CA bundles are configured")
+	}
+
+	// Check no combined-ca-bundle volume exists
+	volumes, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "volumes")
+	for _, vol := range volumes {
+		volMap := vol.(map[string]interface{})
+		if volMap["name"].(string) == caCombinedVolume {
+			t.Errorf("%s volume should not exist when no CA bundles are configured", caCombinedVolume)
+		}
+	}
+
+	// Check CA bundle env vars are not set
+	containers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	container := containers[0].(map[string]interface{})
+	envVars, _, _ := unstructured.NestedSlice(container, "env")
+
+	caBundleEnvVars := []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE", "PGSSLROOTCERT"}
+	for _, env := range envVars {
+		envMap := env.(map[string]interface{})
+		name := envMap["name"].(string)
+		for _, caVar := range caBundleEnvVars {
+			if name == caVar {
+				t.Errorf("env var %s should not be set when no CA bundles are configured", name)
+			}
+		}
 	}
 }
 

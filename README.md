@@ -54,6 +54,14 @@ Build and push your image:
 make docker-build docker-push IMG=<some-registry>/mlflow-operator:tag
 ```
 
+> **Building on Apple Silicon**: Use `docker-buildx` with CGO disabled to avoid QEMU emulation issues:
+>
+> ```sh
+> CGO_ENABLED=0 PLATFORMS=linux/amd64 make docker-buildx IMG=<some-registry>/mlflow-operator:tag
+> ```
+>
+> This builds without FIPS support, which is acceptable for local development. Production images are built on amd64 CI runners with FIPS enabled.
+
 Install the CRDs:
 ```sh
 make install
@@ -85,6 +93,26 @@ You can customize the gateway name and namespace if needed:
 ```sh
 make deploy-to-platform ODH_GATEWAY_NAME=my-gateway ODH_GATEWAY_NAMESPACE=my-namespace IMG=<some-registry>/mlflow-operator:tag
 ```
+
+**Option 4: Deploy to local Kind cluster**
+
+For local development and testing, you can deploy the MLflow operator to a Kind (Kubernetes IN Docker) cluster with various storage backend configurations:
+
+```sh
+# Deploy with default configuration (SQLite + file storage)
+make deploy-kind
+
+# Deploy with PostgreSQL backend
+make deploy-kind BACKEND_STORE=postgres REGISTRY_STORE=postgres
+
+# Deploy with S3 storage (using SeaweedFS)
+make deploy-kind ARTIFACT_STORAGE=s3
+
+# Deploy with full production-like setup
+make deploy-kind BACKEND_STORE=postgres REGISTRY_STORE=postgres ARTIFACT_STORAGE=s3
+```
+
+For detailed instructions, advanced configuration options, and troubleshooting, see the [Kind Deployment Guide](docs/kind-deployment.md).
 
 **Create MLflow instances**
 
@@ -187,11 +215,45 @@ The operator automatically creates a NetworkPolicy that:
 
 The NetworkPolicy can be customized by modifying the Helm chart values or by creating your own NetworkPolicy.
 
+### Namespace Overrides (MLflowConfig)
+
+`MLflowConfig` is a namespaced singleton used to override artifact storage settings for a namespace.
+Use `apiVersion: mlflow.kubeflow.org/v1` for `MLflowConfig` resources.
+The `metadata.name` must be `mlflow` in every namespace where you want to apply overrides.
+The `spec.artifactRootSecret` must be `mlflow-artifact-connection` to keep Secret access tightly scoped.
+
+### Custom CA Bundles
+
+When connecting to external services that use self-signed certificates or private CAs (such as private S3 endpoints, PostgreSQL databases, or artifact stores), you can configure custom CA bundles.
+
+The operator combines CA certificates from multiple sources into a single bundle:
+1. **System CA bundle** - Base system certificates from the container image
+2. **Platform CA bundle** - Automatically detected from `odh-trusted-ca-bundle` ConfigMap (injected by ODH/RHOAI)
+3. **User-provided CA bundle** - Custom certificates you specify via `caBundleConfigMap`
+
+#### Using a Custom CA Bundle
+
+Create a ConfigMap containing your CA certificates (all `.crt` and `.pem` files will be included):
+```bash
+kubectl create configmap my-ca-bundle \
+  --from-file=ca-bundle.crt=/path/to/your/ca-certificates.pem \
+  -n <namespace>
+```
+
+Reference it in your MLflow CR:
+```yaml
+spec:
+  caBundleConfigMap:
+    name: my-ca-bundle
+```
+
+When CA bundles are present (platform or custom), PostgreSQL connections use `PGSSLMODE=verify-full`. Ensure your PostgreSQL server's certificate is signed by a CA in the bundle, or override via connection string (e.g., `?sslmode=prefer`).
 ### Example Configurations
 
 See the [config/samples](./config/samples/) directory for complete examples:
 - `mlflow_v1_mlflow.yaml` - OpenShift deployment with local storage and service-ca TLS
 - `mlflow_v1_mlflow_remote_storage.yaml` - Remote PostgreSQL + S3 storage with horizontal scaling
+- `mlflow_v1_mlflowconfig.yaml` - Namespace-scoped artifact storage override
 
 ## Troubleshooting
 

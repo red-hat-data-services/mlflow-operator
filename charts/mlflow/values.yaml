@@ -164,3 +164,26 @@ service:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# CA Bundle configuration for TLS verification
+# All .crt and .pem files in each mounted ConfigMap are included.
+caBundle:
+  # File paths to include in the combined CA bundle (processed in order)
+  filePaths: []
+
+  # ConfigMaps to mount as volumes containing CA certificates.
+  # Each entry creates a volume from a ConfigMap and mounts it at the specified path.
+  # The init container and sidecar will glob all .crt and .pem files under each mountPath.
+  # Example:
+  #   configMaps:
+  #     - name: platform-trusted-ca-bundle
+  #       mountPath: /etc/pki/tls/certs/platform
+  #     - name: my-custom-ca-bundle
+  #       mountPath: /etc/pki/tls/certs/custom
+  configMaps: []
+
+  # Output path for the combined CA bundle PEM file
+  # The directory portion is used as the emptyDir mount path
+  outputPath: /etc/pki/tls/certs/combined/ca-bundle.crt
+
+  watchInterval: 30  # Seconds between checks for source file changes
