@@ -702,12 +702,6 @@ class MLflowDeployer:
         print(f"   kubectl port-forward service/mlflow 8080:5000 -n {self.args.namespace}")
         print("   Then visit: http://localhost:8080")
 
-        # Set outputs for GitHub Actions
-        if os.getenv('GITHUB_OUTPUT'):
-            with open(os.getenv('GITHUB_OUTPUT'), 'a') as f:
-                f.write(f"mlflow_url=http://localhost:8080\n")
-                f.write(f"namespace={self.args.namespace}\n")
-                f.write(f"s3_endpoint={self.args.s3_endpoint}\n")
 
     def get_pods_for_deployment(self, deployment_name, namespace):
         """Get pod names for a given deployment"""
@@ -880,6 +874,14 @@ class MLflowDeployer:
         print(f"  Artifact Storage: {self.args.artifact_storage}")
         print(f"  Serve Artifacts: {self.args.serve_artifacts}")
         print()
+
+        # Write all GitHub Actions outputs immediately so they're available even if
+        # deployment fails (e.g. for log collection in downstream steps).
+        if os.getenv('GITHUB_OUTPUT'):
+            with open(os.getenv('GITHUB_OUTPUT'), 'a') as f:
+                f.write(f"namespace={self.args.namespace}\n")
+                f.write("mlflow_url=http://localhost:8080\n")
+                f.write(f"s3_endpoint={self.args.s3_endpoint}\n")
 
         try:
             # Step 1: Create namespace
