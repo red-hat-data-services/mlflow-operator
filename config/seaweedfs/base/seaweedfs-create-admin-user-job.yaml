@@ -30,6 +30,8 @@ spec:
             configMapKeyRef:
               name: seaweedfs-params
               key: S3_ADMIN_USER
+        - name: S3_SCHEME
+          value: "http"
         envFrom:
         - secretRef:
             name: aws-credentials
@@ -46,7 +48,9 @@ spec:
           fi
 
           # Wait for SeaweedFS S3 service to be ready
-          service_url="http://minio-service.$NAMESPACE:9000/"
+          service_url="${S3_SCHEME}://minio-service.$NAMESPACE:9000/"
+          wget_opts="-T 10 -t 1 -qO-"
+          [ "${S3_SCHEME}" = "https" ] && wget_opts="$wget_opts --no-check-certificate"
           max_attempts=60
           attempt=1
 
@@ -55,13 +59,16 @@ spec:
 
           while [ $attempt -le $max_attempts ]; do
             # Check if the service is responding (403 Forbidden is expected and means service is running)
-            if wget -T 10 -t 1 -qO- "$service_url" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            if wget $wget_opts "$service_url" >/dev/null 2>&1; then
               echo "Service at $service_url is ready! (HTTP 2xx)"
               break
-            elif wget -T 10 -t 1 -qO- "$service_url" 2>&1 | grep -q "403 Forbidden"; then
+            # shellcheck disable=SC2086
+            elif wget $wget_opts "$service_url" 2>&1 | grep -q "403 Forbidden"; then
               echo "Service at $service_url is ready! (HTTP 403 - expected)"
               break
-            elif wget -T 10 -t 1 -qO- "$service_url" 2>&1 | grep -q "server returned error"; then
+            # shellcheck disable=SC2086
+            elif wget $wget_opts "$service_url" 2>&1 | grep -q "server returned error"; then
               echo "Service at $service_url is ready! (Server responded with error - service is up)"
               break
             elif [ $((attempt % 6)) -eq 0 ]; then
@@ -77,7 +84,8 @@ spec:
             echo "Last response: $response"
             echo "Debugging information:"
             echo "Attempting direct connection test..."
-            wget -T 10 -t 1 -qO- "$service_url" || true
+            # shellcheck disable=SC2086
+            wget $wget_opts "$service_url" || true
             exit 1
           fi
           echo "Creating S3 bucket using HTTP API..."
@@ -89,7 +97,11 @@ spec:
 
           # Try with curl first, fall back to simple approach if curl not available
           if command -v curl >/dev/null 2>&1; then
-            if curl -X PUT -H "Content-Type: application/xml" --data @/tmp/bucket_config.xml "http://minio-service.$NAMESPACE:9000/mlpipeline" --connect-timeout 10 --max-time 30 >/dev/null 2>&1; then
+            curl_opts="--connect-timeout 10 --max-time 30"
+            [ "${S3_SCHEME}" = "https" ] && curl_opts="$curl_opts --insecure"
+            # shellcheck disable=SC2086
+            if curl -X PUT -H "Content-Type: application/xml" --data @/tmp/bucket_config.xml \
+                "${S3_SCHEME}://minio-service.$NAMESPACE:9000/mlpipeline" $curl_opts >/dev/null 2>&1; then
               echo "Bucket 'mlpipeline' created successfully via API"
             else
               echo "Bucket creation failed or bucket already exists"
@@ -102,7 +114,8 @@ spec:
           fi
 
           echo "Testing S3 API functionality..."
-          if wget -T 5 -qO- http://minio-service.$NAMESPACE:9000/mlpipeline 2>/dev/null; then
+          # shellcheck disable=SC2086
+          if wget $wget_opts "${S3_SCHEME}://minio-service.$NAMESPACE:9000/mlpipeline" 2>/dev/null; then
             echo "S3 bucket is accessible - SeaweedFS S3 API is working"
           else
             echo "S3 bucket test returned expected response - SeaweedFS is ready"

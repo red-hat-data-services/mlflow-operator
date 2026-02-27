@@ -12,6 +12,7 @@ import yaml
 import os
 import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import List, Union
 from urllib.parse import quote_plus
@@ -22,14 +23,20 @@ class MLflowDeployer:
         self.args = args
         self.repo_root = Path(__file__).parent.parent.parent.parent
 
-        # Set default endpoints if not provided.
+        # Set default endpoints if not provided
         # For externals3 the endpoint is caller-supplied; don't override with the
         # in-cluster SeaweedFS/minio address.
         if not self.args.s3_endpoint and self.args.artifact_storage != "externals3":
-            self.args.s3_endpoint = f"http://minio-service.{self.args.namespace}.svc.cluster.local:9000"
+            scheme = "https" if self.args.seaweedfs_tls else "http"
+            self.args.s3_endpoint = f"{scheme}://minio-service.{self.args.namespace}.svc.cluster.local:9000"
 
         if not self.args.postgres_host:
             self.args.postgres_host = f"postgres-service.{self.args.namespace}.svc.cluster.local"
+
+        # Auto-upgrade sslmode when postgres TLS is enabled and the caller left
+        # the default "disable" in place (they haven't made an explicit choice).
+        if self.args.postgres_tls and self.args.postgres_sslmode == "disable":
+            self.args.postgres_sslmode = "require"
 
         print(f"Repository root: {self.repo_root}")
         print(f"Target namespace: {self.args.namespace}")
@@ -267,11 +274,47 @@ class MLflowDeployer:
         cmd += ["-n", self.args.namespace]
         self.run_command(cmd, "Creating S3 credentials secret", capture_output=True)
 
+    def _create_tls_secret(self, secret_name: str, cn: str,
+                           cert_filename: str = "tls.crt",
+                           key_filename: str = "tls.key"):
+        """Generate a self-signed TLS cert via host openssl and create a K8s Secret."""
+        print(f"🔐 Generating self-signed TLS cert (CN={cn}) for {secret_name}...")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cert_path = f"{tmpdir}/{cert_filename}"
+            key_path = f"{tmpdir}/{key_filename}"
+
+            self.run_command([
+                "openssl", "req", "-new", "-x509", "-days", "3650", "-nodes",
+                "-subj", f"/CN={cn}",
+                "-out", cert_path,
+                "-keyout", key_path,
+            ], f"Generating self-signed TLS cert for {cn}")
+
+            self.run_command([
+                "kubectl", "delete", "secret", secret_name,
+                "-n", self.args.namespace,
+            ], check=False, capture_output=True)
+
+            self.run_command([
+                "kubectl", "create", "secret", "generic", secret_name,
+                f"--from-file={cert_filename}={cert_path}",
+                f"--from-file={key_filename}={key_path}",
+                "-n", self.args.namespace,
+            ], f"Creating TLS Secret {secret_name}")
+
     def deploy_seaweedfs(self):
         """Deploy SeaweedFS for S3-compatible storage"""
         print("🌊 Deploying SeaweedFS...")
 
-        platform_overlay = "openshift" if self.args.platform == "openshift" else "base"
+        if self.args.seaweedfs_tls:
+            self._create_tls_secret(
+                "seaweedfs-tls-certs", cn="minio-service",
+                cert_filename="tls.crt", key_filename="tls.key",
+            )
+            platform_overlay = "openshift-tls" if self.args.platform == "openshift" else "tls"
+        else:
+            platform_overlay = "openshift" if self.args.platform == "openshift" else "base"
+
         seaweedfs_path = self.repo_root / "config" / "seaweedfs" / platform_overlay
         seaweedfs_params_env = self.repo_root / "config" / "seaweedfs" / "base" / "params.env"
 
@@ -486,7 +529,10 @@ class MLflowDeployer:
         """Deploy PostgreSQL for database storage"""
         print("🐘 Deploying PostgreSQL...")
 
-        platform_overlay = "openshift" if self.args.platform == "openshift" else "base"
+        if self.args.postgres_tls:
+            platform_overlay = "openshift-tls" if self.args.platform == "openshift" else "tls"
+        else:
+            platform_overlay = "openshift" if self.args.platform == "openshift" else "base"
         postgres_path = self.repo_root / "config" / "postgres" / platform_overlay
         postgres_params_env = self.repo_root / "config" / "postgres" / "base" / "params.env"
 
@@ -888,8 +934,21 @@ class MLflowDeployer:
             else:
                 print(f"⚠️  Pod {pod_name} is not ready for log retrieval yet")
 
+    def _validate_args(self):
+        if self.args.artifact_storage == "externals3":
+            missing = []
+            if not self.args.s3_access_key:
+                missing.append("--s3-access-key")
+            if not self.args.s3_secret_key:
+                missing.append("--s3-secret-key")
+            if not self.args.s3_bucket:
+                missing.append("--s3-bucket")
+            if missing:
+                raise ValueError(f"externals3 requires {', '.join(missing)} to be set")
+
     def deploy(self):
         """Main deployment orchestration"""
+        self._validate_args()
         print("🚀 Starting MLflow deployment on Kubernetes cluster...")
         print(f"Configuration:")
         print(f"  Namespace: {self.args.namespace}")
@@ -945,21 +1004,6 @@ class MLflowDeployer:
         except Exception as e:
             print(f"❌ Deployment failed: {e}")
             sys.exit(1)
-        finally:
-            # Always clean up TLS files for security, regardless of success or failure
-            self.cleanup_tls_certificates()
-
-def validate_args(args):
-    if args.artifact_storage == "externals3":
-        missing = []
-        if not args.s3_access_key:
-            missing.append("--s3-access-key")
-        if not args.s3_secret_key:
-            missing.append("--s3-secret-key")
-        if not args.s3_bucket:
-            missing.append("--s3-bucket")
-        if missing:
-            raise ValueError(f"externals3 requires {', '.join(missing)} to be set")
 
 
 def main():
@@ -995,12 +1039,19 @@ def main():
     parser.add_argument("--registry-store-uri", default="sqlite:////mlflow/mlflow.db")
     parser.add_argument("--artifacts-destination", default="file:///mlflow/artifacts")
 
+    # TLS flags — enable self-signed TLS for self-deployed infrastructure.
+    # Postgres generates its own cert at container startup (no external deps).
+    # SeaweedFS cert is generated on the host by this script via openssl and stored as a Secret.
+    parser.add_argument("--postgres-tls", action="store_true", default=False,
+                       help="Enable TLS on the self-deployed PostgreSQL server.")
+    parser.add_argument("--seaweedfs-tls", action="store_true", default=False,
+                       help="Enable TLS on the self-deployed SeaweedFS S3 endpoint.")
+
     # Target platform — selects the appropriate kustomize overlay for infrastructure
     parser.add_argument("--platform", default="base", choices=["base", "openshift"],
                        help="Target platform (default: base). Selects the postgres/seaweedfs "
-                            "overlay: 'base' uses the platform-agnostic overlay (ie for Kind "
-                            "or other Kubernetes clusters), 'openshift' uses the "
-                            "OpenShift overlay with platform-specific patches.")
+                            "overlay: 'base' uses the platform-agnostic overlay, "
+                            "'openshift' uses the OpenShift overlay with platform-specific patches.")
 
     # Infrastructure images (override to avoid Docker Hub rate limits)
     parser.add_argument("--postgres-image", default="postgres:13",
@@ -1031,18 +1082,11 @@ def main():
 
     args = parser.parse_args()
 
-    # Apply SeaweedFS defaults for self-deployed S3 storage
+    # Apply SeaweedFS defaults for self-deployed S3 storage if not provided
     if args.artifact_storage == "s3":
         args.s3_bucket = args.s3_bucket or "mlpipeline"
         args.s3_access_key = args.s3_access_key or "minio"
         args.s3_secret_key = args.s3_secret_key or "minio123"
-
-    try:
-        validate_args(args)
-    except ValueError as e:
-        print(f"❌ Input parameters validation failed: {e}")
-        print("Please check the input parameters and try again.")
-        sys.exit(1)
 
     deployer = MLflowDeployer(args)
     deployer.deploy()

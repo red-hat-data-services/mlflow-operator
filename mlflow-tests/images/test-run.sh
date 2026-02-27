@@ -67,6 +67,13 @@ Infrastructure image overrides:
   POSTGRES_IMAGE        PostgreSQL container image override
   SEAWEEDFS_IMAGE       SeaweedFS container image override
 
+TLS (self-deployed infrastructure):
+  POSTGRES_TLS          true|false — enable TLS on the self-deployed PostgreSQL server (default: false)
+                        When true, sslmode is automatically upgraded to "require" unless DB_SSLMODE is set.
+  SEAWEEDFS_TLS         true|false — enable TLS on the self-deployed SeaweedFS S3 endpoint (default: false)
+                        When true, the S3 endpoint scheme is automatically switched to https://.
+                        A self-signed cert is generated on the host via openssl and stored as a K8s Secret.
+
 Operator / OpenShift:
   DEPLOY_MLFLOW_OPERATOR  true|false — patch the OLM CSV instead of deploying via kustomize;
                           use on OpenShift/OLM clusters (default: true)
@@ -163,6 +170,10 @@ fi
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-}"
 SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-}"
 
+# TLS flags for self-deployed infrastructure
+POSTGRES_TLS="${POSTGRES_TLS:-false}"
+SEAWEEDFS_TLS="${SEAWEEDFS_TLS:-false}"
+
 # PostgreSQL sslmode appended to the connection URI.
 # Leave empty to let deploy.py use its default ("disable" for self-deployed postgres).
 DB_SSLMODE="${DB_SSLMODE:-}"
@@ -214,10 +225,29 @@ cleanup() {
         kubectl delete clusterrolebinding "mlflow-config-view-${MLFLOW_NAME}" --ignore-not-found 2>/dev/null || true
         kubectl delete clusterrole "mlflow-config-reader-${MLFLOW_NAME}" --ignore-not-found 2>/dev/null || true
 
+        # Delete the SeaweedFS TLS Secret that deploy.py created (if applicable).
+        # The postgres cert lives in an ephemeral emptyDir and disappears with the pod.
+        if [ "${SEAWEEDFS_TLS:-false}" = "true" ]; then
+            kubectl delete secret seaweedfs-tls-certs \
+                -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+        fi
+
         if [ "$SKIP_INFRASTRUCTURE" != "true" ]; then
-            local infra_overlay="$INFRASTRUCTURE_PLATFORM"
+            # Compute per-component overlay directories, accounting for TLS overlays.
+            local postgres_overlay seaweedfs_overlay
+            if [ "${POSTGRES_TLS:-false}" = "true" ]; then
+                [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && postgres_overlay="openshift-tls" || postgres_overlay="tls"
+            else
+                postgres_overlay="$INFRASTRUCTURE_PLATFORM"
+            fi
+            if [ "${SEAWEEDFS_TLS:-false}" = "true" ]; then
+                [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && seaweedfs_overlay="openshift-tls" || seaweedfs_overlay="tls"
+            else
+                seaweedfs_overlay="$INFRASTRUCTURE_PLATFORM"
+            fi
+
             echo "  Removing self-deployed infrastructure..."
-            kustomize build "$REPO_ROOT/config/postgres/$infra_overlay" \
+            kustomize build "$REPO_ROOT/config/postgres/$postgres_overlay" \
                 | kubectl delete --ignore-not-found -n "$NAMESPACE" -f - 2>/dev/null || true
             # Only tear down SeaweedFS if the in-cluster s3 backend was used.
             # externals3 uses an external S3 service that this run did not deploy.
@@ -225,7 +255,7 @@ cleanup() {
                 export APPLICATION_CRD_ID=mlflow-pipelines \
                        PROFILE_NAMESPACE_LABEL=mlflow-profile \
                        S3_ADMIN_USER=kind-admin
-                kustomize build "$REPO_ROOT/config/seaweedfs/$infra_overlay" \
+                kustomize build "$REPO_ROOT/config/seaweedfs/$seaweedfs_overlay" \
                     | envsubst '$NAMESPACE,$APPLICATION_CRD_ID,$PROFILE_NAMESPACE_LABEL,$S3_ADMIN_USER' \
                     | kubectl delete --ignore-not-found -f - 2>/dev/null || true
             fi
@@ -342,6 +372,8 @@ run_suite() {
         [ -n "${POSTGRES_IMAGE:-}"  ] && deploy_args+=(--postgres-image  "$POSTGRES_IMAGE")
         [ -n "${SEAWEEDFS_IMAGE:-}" ] && deploy_args+=(--seaweedfs-image "$SEAWEEDFS_IMAGE")
         [ -n "${DB_SSLMODE:-}"      ] && deploy_args+=(--postgres-sslmode "$DB_SSLMODE")
+        [ "${POSTGRES_TLS:-false}"  = "true" ] && deploy_args+=(--postgres-tls)
+        [ "${SEAWEEDFS_TLS:-false}" = "true" ] && deploy_args+=(--seaweedfs-tls)
 
         # Skip operator when OLM manages it, when explicitly requested, or when it
         # was already deployed by a previous suite in this run.
