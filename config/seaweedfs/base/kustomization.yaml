@@ -12,10 +12,26 @@ resources:
 - minio-service.yaml
 - mlflow-aws-secret.yaml
 
-# Create ConfigMap from params.env for environment variable substitution
 configMapGenerator:
 - name: seaweedfs-params
   envs:
   - params.env
   options:
     disableNameSuffixHash: true
+
+replacements:
+- source:
+    kind: ConfigMap
+    name: seaweedfs-params
+    fieldPath: data.SEAWEEDFS_IMAGE
+  targets:
+  - select:
+      kind: Deployment
+      name: seaweedfs
+    fieldPaths:
+    - spec.template.spec.containers.[name=seaweedfs].image
+  - select:
+      kind: Job
+      name: init-seaweedfs
+    fieldPaths:
+    - spec.template.spec.containers.[name=init-seaweedfs].image

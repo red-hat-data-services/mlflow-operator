@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/url"
 	"path/filepath"
+	"strings"
 
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
@@ -47,6 +49,9 @@ const (
 	systemCAPath    = "/etc/pki/tls/certs/ca-bundle.crt"
 	caPlatformMount = "/etc/pki/tls/certs/platform"
 	caCustomMount   = "/etc/pki/tls/certs/custom"
+
+	serviceCABundleConfigMapName = "openshift-service-ca.crt"
+	serviceCABundleConfigMapKey  = "service-ca.crt"
 )
 
 // getResourceSuffix returns the resource suffix for naming MLflow resources.
@@ -59,6 +64,38 @@ func getResourceSuffix(mlflowName string) string {
 	return "-" + mlflowName
 }
 
+// buildCORSAllowedOrigins returns a comma-separated list of allowed CORS origins
+// combining safe defaults with any user-specified extra origins from the CR spec.
+func buildCORSAllowedOrigins(mlflow *mlflowv1.MLflow, namespace string, cfg *config.OperatorConfig) string {
+	serviceName := ResourceName + getResourceSuffix(mlflow.Name)
+	const servicePort = 8443
+
+	corsOrigins := []string{
+		fmt.Sprintf("https://%s:%d", serviceName, servicePort),
+		fmt.Sprintf("https://%s.%s.svc:%d", serviceName, namespace, servicePort),
+		fmt.Sprintf("https://%s.%s.svc.cluster.local:%d", serviceName, namespace, servicePort),
+		"localhost:*",
+		"127.0.0.1:*",
+	}
+
+	if cfg.MLflowURL != "" {
+		if u, err := url.Parse(cfg.MLflowURL); err == nil && u.Scheme != "" && u.Host != "" {
+			origin := u.Scheme + "://" + u.Host
+			corsOrigins = append(corsOrigins, origin)
+		}
+	}
+
+	for _, o := range mlflow.Spec.ExtraAllowedOrigins {
+		o = strings.TrimSpace(o)
+		if o == "" || strings.Contains(o, ",") {
+			continue
+		}
+		corsOrigins = append(corsOrigins, o)
+	}
+
+	return strings.Join(corsOrigins, ",")
+}
+
 // HelmRenderer handles rendering of Helm charts
 type HelmRenderer struct {
 	chartPath string
@@ -68,6 +105,12 @@ type HelmRenderer struct {
 type RenderOptions struct {
 	// PlatformTrustedCABundleExists indicates if the platform CA bundle ConfigMap exists in the target namespace
 	PlatformTrustedCABundleExists bool
+	// IsOpenShift indicates if the cluster is an OpenShift platform (detected via ConsoleLink CRD availability).
+	// When true, the operator configures service-ca-based TLS verification for Prometheus metrics scraping.
+	IsOpenShift bool
+	// ServiceMonitorAvailable indicates if the ServiceMonitor CRD (monitoring.coreos.com/v1) is available.
+	// When false, metrics.enabled is set to false to prevent rendering the ServiceMonitor manifest.
+	ServiceMonitorAvailable bool
 }
 
 // NewHelmRenderer creates a new HelmRenderer
@@ -126,6 +169,11 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 
 	tlsValues := map[string]interface{}{
 		"secretName": tlsSecretName,
+	}
+	if opts.IsOpenShift {
+		tlsValues["defaultMode"] = 416 // 0640 — group-readable; OpenShift SCC assigns fsGroup
+	} else {
+		tlsValues["defaultMode"] = 420 // 0644 — world-readable; no fsGroup on vanilla K8s
 	}
 
 	values["tls"] = tlsValues
@@ -326,6 +374,8 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 		mlflowConfig["registryStoreUriFrom"] = registryStoreURIFrom
 	}
 
+	mlflowConfig["corsAllowedOrigins"] = buildCORSAllowedOrigins(mlflow, namespace, cfg)
+
 	values["mlflow"] = mlflowConfig
 
 	env := make([]interface{}, 0, len(mlflow.Spec.Env))
@@ -373,6 +423,31 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 		"annotations": serviceAnnotations,
 	}
 
+	// Metrics configuration - only enabled when the ServiceMonitor CRD is present in the cluster.
+	// On OpenShift, configure service-ca-based TLS verification for Prometheus scraping.
+	// On non-OpenShift clusters, fall back to insecureSkipVerify.
+	metricsConfig := map[string]interface{}{
+		"enabled": opts.ServiceMonitorAvailable,
+	}
+	if opts.IsOpenShift {
+		serviceName := "mlflow" + getResourceSuffix(mlflow.Name)
+		serverName := fmt.Sprintf("%s.%s.svc", serviceName, namespace)
+		metricsConfig["tlsConfig"] = map[string]interface{}{
+			"ca": map[string]interface{}{
+				"configMap": map[string]interface{}{
+					"name": serviceCABundleConfigMapName,
+					"key":  serviceCABundleConfigMapKey,
+				},
+			},
+			"serverName": serverName,
+		}
+	} else {
+		metricsConfig["tlsConfig"] = map[string]interface{}{
+			"insecureSkipVerify": true,
+		}
+	}
+	values["metrics"] = metricsConfig
+
 	if mlflow.Spec.PodSecurityContext != nil {
 		// Convert PodSecurityContext to map
 		// For now, we'll pass through the whole object as-is
@@ -392,7 +467,10 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 	} else {
 		values["securityContext"] = map[string]interface{}{
 			"allowPrivilegeEscalation": false,
-			"readOnlyRootFilesystem":   false,
+			"readOnlyRootFilesystem":   true,
+			"capabilities": map[string]interface{}{
+				"drop": []string{"ALL"},
+			},
 		}
 	}
 
@@ -412,6 +490,18 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 		values["affinity"] = mlflow.Spec.Affinity
 	} else {
 		values["affinity"] = map[string]interface{}{}
+	}
+
+	additionalEgressRules := make([]interface{}, 0, len(mlflow.Spec.NetworkPolicyAdditionalEgressRules))
+	for i, rule := range mlflow.Spec.NetworkPolicyAdditionalEgressRules {
+		ruleMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&rule)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert networkPolicyAdditionalEgressRules[%d]: %w", i, err)
+		}
+		additionalEgressRules = append(additionalEgressRules, ruleMap)
+	}
+	values["networkPolicy"] = map[string]interface{}{
+		"additionalEgressRules": additionalEgressRules,
 	}
 
 	return values, nil

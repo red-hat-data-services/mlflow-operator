@@ -157,6 +157,17 @@ The deployment always sets `MLFLOW_DISABLE_TELEMETRY=true` and `MLFLOW_SERVER_EN
 
 TLS is terminated inside the MLflow container using uvicorn options. Certificates come from the `mlflow-tls` secret, which is created automatically on OpenShift via the `service.beta.openshift.io/serving-cert-secret-name` annotation. If you need to provide your own certificates, place `tls.crt` and `tls.key` in a secret named `mlflow-tls` (or override `tls.secretName` in Helm values).
 
+### Operator RBAC Privileges
+
+The operator requires two levels of RBAC permissions:
+
+- **Cluster-scoped** (`config/rbac/role.yaml`): Manages the MLflow custom resource lifecycle, enumerates namespaces, reads artifact storage credentials, watches MLflowConfig overrides, manages ClusterRoles/ClusterRoleBindings for MLflow server pods, and handles OpenShift console links and Gateway API routes.
+- **Namespace-scoped** (`config/rbac/namespace_role.yaml`): Manages deployment resources (ConfigMaps, Secrets, ServiceAccounts, Services, PVCs, Deployments, NetworkPolicies, ServiceMonitors) within the target namespace.
+
+The operator also creates a shared `mlflow` ClusterRole for the MLflow server pod itself, granting read-only cluster-wide access to namespaces, a single well-known secret (`mlflow-artifact-connection`), and MLflowConfig CRs. These cannot be scoped to a single namespace because MLflow serves requests across namespaces.
+
+See the manifest files for detailed per-resource documentation.
+
 ### Storage Configuration
 
 #### Local Storage (Development/Testing)
@@ -207,13 +218,40 @@ kubectl create secret generic mlflow-db-credentials \
   -n <namespace>
 ```
 
+### CORS Configuration
+
+The operator automatically configures `MLFLOW_SERVER_CORS_ALLOWED_ORIGINS` with safe defaults:
+- Kubernetes service names (short, namespaced, and FQDN forms)
+- The data science gateway domain (from the operator's `MLFLOW_URL` env var)
+- `localhost` and `127.0.0.1` (for development and Kind integration tests)
+
+To allow additional origins, use `extraAllowedOrigins` in the MLflow CR:
+```yaml
+spec:
+  extraAllowedOrigins:
+    - "https://my-app.example.com"
+    - "https://jupyter.example.com:8888"
+```
+
+For standalone Helm deployments (without the operator), set `mlflow.corsAllowedOrigins` directly:
+```sh
+helm install mlflow . --set mlflow.corsAllowedOrigins="https://my-app.example.com,https://other.example.com"
+```
+
 ### Network Security
 
 The operator automatically creates a NetworkPolicy that:
-- **Ingress**: Allows traffic to the MLflow HTTPS port (8443)
-- **Egress**: Allows all outbound traffic (for database connections, S3 access, etc.)
+- **Ingress**: Allows traffic to the MLflow HTTPS port (8443) from any pod in the cluster
+- **Egress**: Allows DNS (port 53), HTTPS (port 443), Kubernetes API (port 6443), PostgreSQL (port 5432), MySQL (port 3306), and S3-compatible object storage (MinIO port 9000, SeaweedFS port 8333)
 
-The NetworkPolicy can be customized by modifying the Helm chart values or by creating your own NetworkPolicy.
+If your deployment uses non-standard ports (e.g., a database on a custom port), add additional egress rules:
+```yaml
+spec:
+  networkPolicyAdditionalEgressRules:
+    - ports:
+        - protocol: TCP
+          port: 15432
+```
 
 ### Namespace Overrides (MLflowConfig)
 

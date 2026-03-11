@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:13 # Use a stable Postgres version
+          image: postgres:13
           ports:
             - containerPort: 5432
           env:
