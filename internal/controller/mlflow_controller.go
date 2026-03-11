@@ -22,6 +22,7 @@ import (
 	"time"
 
 	consolev1 "github.com/openshift/api/console/v1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -51,11 +52,12 @@ const (
 // MLflowReconciler reconciles a MLflow object
 type MLflowReconciler struct {
 	client.Client
-	Scheme               *runtime.Scheme
-	Namespace            string
-	ChartPath            string
-	ConsoleLinkAvailable bool
-	HTTPRouteAvailable   bool
+	Scheme                  *runtime.Scheme
+	Namespace               string
+	ChartPath               string
+	ConsoleLinkAvailable    bool
+	HTTPRouteAvailable      bool
+	ServiceMonitorAvailable bool
 }
 
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows,verbs=get;list;watch;create;update;patch;delete
@@ -64,7 +66,6 @@ type MLflowReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,resourceNames=mlflow-artifact-connection,verbs=get
 // +kubebuilder:rbac:groups=mlflow.kubeflow.org,resources=mlflowconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=console.openshift.io,resources=consolelinks,verbs=get;list;watch;create;update;patch;delete
@@ -166,6 +167,9 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	renderer := NewHelmRenderer(helmChartPath)
 	renderOpts := RenderOptions{
 		PlatformTrustedCABundleExists: platformCABundleExists,
+		// If ConsoleLink is available, we can assume we are on OpenShift
+		IsOpenShift:             r.ConsoleLinkAvailable,
+		ServiceMonitorAvailable: r.ServiceMonitorAvailable,
 	}
 	objects, err := renderer.RenderChart(mlflow, targetNamespace, renderOpts)
 	if err != nil {
@@ -402,6 +406,14 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		builder = builder.Owns(&gatewayv1.HTTPRoute{})
 	} else {
 		log.Info("HTTPRoute CRD not available, skipping watch")
+	}
+
+	// Conditionally watch ServiceMonitor if available in the cluster
+	if r.ServiceMonitorAvailable {
+		log.Info("ServiceMonitor CRD available, adding to watch list")
+		builder = builder.Owns(&monitoringv1.ServiceMonitor{})
+	} else {
+		log.Info("ServiceMonitor CRD not available, skipping watch")
 	}
 
 	return builder.Complete(r)

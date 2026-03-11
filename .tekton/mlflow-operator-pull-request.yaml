@@ -2,7 +2,7 @@ apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
   annotations:
-    build.appstudio.openshift.io/repo: https://github.com/opendatahub-io/mlflow-operator?rev={{revision}}
+    build.appstudio.openshift.io/repo: https://github.com/red-hat-data-services/mlflow-operator?rev={{revision}}
     build.appstudio.redhat.com/commit_sha: '{{revision}}'
     build.appstudio.redhat.com/target_branch: '{{target_branch}}'
     build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
@@ -12,11 +12,11 @@ metadata:
       == "main"
   creationTimestamp: null
   labels:
-    appstudio.openshift.io/application: opendatahub-builds
-    appstudio.openshift.io/component: mlflow-operator-ci
+    appstudio.openshift.io/application: automation
+    appstudio.openshift.io/component: pull-request-pipelines-mlflow-operator
     pipelines.appstudio.openshift.io/type: build
   name: mlflow-operator-on-pull-request
-  namespace: open-data-hub-tenant
+  namespace: rhoai-tenant
 spec:
   params:
   - name: git-url
@@ -24,27 +24,45 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/opendatahub/mlflow-operator:odh-pr
+    value: quay.io/rhoai/pull-request-pipelines:mlflow-operator-{{revision}}
   - name: dockerfile
-    value: Dockerfile
+    value: Dockerfile.konflux
   - name: path-context
     value: .
+  - name: hermetic
+    value: true
+  - name: prefetch-input
+    value: |
+      {
+        "type": "gomod",
+        "path": "."
+      }
   - name: additional-tags
     value:
     - 'odh-pr-{{revision}}'
   - name: pipeline-type
     value: pull-request
+  - name: build-platforms
+    value:
+    - linux/x86_64
+    - linux-m2xlarge/arm64
+    - linux/ppc64le
+    - linux/s390x
+  - name: image-expires-after
+    value: 5d
+  - name: enable-slack-failure-notification
+    value: "false"
   pipelineRef:
     resolver: git
     params:
     - name: url
-      value: https://github.com/opendatahub-io/odh-konflux-central.git
+      value: https://github.com/red-hat-data-services/konflux-central.git
     - name: revision
-      value: main
+      value: '{{ target_branch }}'
     - name: pathInRepo
-      value: pipeline/multi-arch-container-build.yaml
+      value: pipelines/multi-arch-container-build.yaml
   taskRunTemplate:
-    serviceAccountName: build-pipeline-mlflow-operator
+    serviceAccountName: build-pipeline-pull-request-pipelines
   workspaces:
   - name: git-auth
     secret:
