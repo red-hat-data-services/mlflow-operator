@@ -17,16 +17,20 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/onsi/gomega"   // nolint:staticcheck // Named import for gomega.NewWithT; dual import for readability
 	. "github.com/onsi/gomega" // Dot import for matchers like HaveOccurred
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	mlflowv1 "github.com/opendatahub-io/mlflow-operator/api/v1"
+	"github.com/opendatahub-io/mlflow-operator/internal/config"
 )
 
 const (
@@ -1506,6 +1510,566 @@ func TestRenderChart_NoCABundle(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestMlflowToHelmValues_Metrics(t *testing.T) {
+	renderer := &HelmRenderer{}
+
+	tests := []struct {
+		name                    string
+		mlflow                  *mlflowv1.MLflow
+		namespace               string
+		isOpenShift             bool
+		serviceMonitorAvailable bool
+		wantEnabled             bool
+		wantServerName          string
+	}{
+		{
+			name: "OpenShift: metrics enabled with CA-based tlsConfig",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace:               "test-namespace",
+			isOpenShift:             true,
+			serviceMonitorAvailable: true,
+			wantEnabled:             true,
+			wantServerName:          "mlflow.test-namespace.svc",
+		},
+		{
+			name: "OpenShift: custom CR name includes suffix in serverName",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "custom-mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace:               "opendatahub",
+			isOpenShift:             true,
+			serviceMonitorAvailable: true,
+			wantEnabled:             true,
+			wantServerName:          "mlflow-custom-mlflow.opendatahub.svc",
+		},
+		{
+			name: "non-OpenShift: metrics enabled with insecureSkipVerify",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace:               "default",
+			isOpenShift:             false,
+			serviceMonitorAvailable: true,
+			wantEnabled:             true,
+		},
+		{
+			name: "ServiceMonitor CRD absent: metrics disabled regardless of platform",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace:               "default",
+			isOpenShift:             false,
+			serviceMonitorAvailable: false,
+			wantEnabled:             false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+
+			opts := RenderOptions{IsOpenShift: tt.isOpenShift, ServiceMonitorAvailable: tt.serviceMonitorAvailable}
+			values, err := renderer.mlflowToHelmValues(tt.mlflow, tt.namespace, opts)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			metrics, ok := values["metrics"].(map[string]interface{})
+			g.Expect(ok).To(BeTrue(), "metrics should be present in values")
+
+			enabled, ok := metrics["enabled"].(bool)
+			g.Expect(ok).To(BeTrue(), "metrics.enabled should be present")
+			g.Expect(enabled).To(Equal(tt.wantEnabled))
+
+			tlsConfig, hasTLSConfig := metrics["tlsConfig"].(map[string]interface{})
+			g.Expect(hasTLSConfig).To(BeTrue(), "metrics.tlsConfig should always be present")
+
+			if tt.isOpenShift {
+				// Verify CA config
+				ca, ok := tlsConfig["ca"].(map[string]interface{})
+				g.Expect(ok).To(BeTrue(), "tlsConfig.ca should be present")
+
+				configMap, ok := ca["configMap"].(map[string]interface{})
+				g.Expect(ok).To(BeTrue(), "tlsConfig.ca.configMap should be present")
+				g.Expect(configMap["name"]).To(Equal("openshift-service-ca.crt"))
+				g.Expect(configMap["key"]).To(Equal("service-ca.crt"))
+
+				// Verify serverName
+				serverName, ok := tlsConfig["serverName"].(string)
+				g.Expect(ok).To(BeTrue(), "tlsConfig.serverName should be present")
+				g.Expect(serverName).To(Equal(tt.wantServerName))
+			} else {
+				// Verify insecureSkipVerify fallback
+				insecureSkipVerify, ok := tlsConfig["insecureSkipVerify"].(bool)
+				g.Expect(ok).To(BeTrue(), "tlsConfig.insecureSkipVerify should be present")
+				g.Expect(insecureSkipVerify).To(BeTrue())
+
+				_, hasCA := tlsConfig["ca"]
+				g.Expect(hasCA).To(BeFalse(), "tlsConfig.ca should not be present on non-OpenShift")
+
+				_, hasServerName := tlsConfig["serverName"]
+				g.Expect(hasServerName).To(BeFalse(), "tlsConfig.serverName should not be present on non-OpenShift")
+			}
+		})
+	}
+}
+
+func TestRenderChart_ServiceMonitorWithTLSConfig(t *testing.T) {
+	g := gomega.NewWithT(t)
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	// Render chart on OpenShift - CA-based tlsConfig should be set
+	objs, err := renderer.RenderChart(mlflow, "opendatahub", RenderOptions{IsOpenShift: true, ServiceMonitorAvailable: true})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Find the ServiceMonitor
+	var serviceMonitor *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == "ServiceMonitor" {
+			serviceMonitor = obj
+			break
+		}
+	}
+	g.Expect(serviceMonitor).NotTo(gomega.BeNil(), "ServiceMonitor should be rendered when metrics.enabled=true")
+
+	// Verify ServiceMonitor metadata
+	g.Expect(serviceMonitor.GetName()).To(gomega.Equal("mlflow-metrics-monitor-test-mlflow"))
+	g.Expect(serviceMonitor.GetNamespace()).To(gomega.Equal("opendatahub"))
+
+	// Verify labels include instance-specific app label
+	labels := serviceMonitor.GetLabels()
+	g.Expect(labels["app"]).To(gomega.Equal("mlflow-test-mlflow"))
+
+	// Verify endpoints configuration
+	endpoints, found, err := unstructured.NestedSlice(serviceMonitor.Object, "spec", "endpoints")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	g.Expect(endpoints).To(gomega.HaveLen(1))
+
+	endpoint := endpoints[0].(map[string]interface{})
+	g.Expect(endpoint["path"]).To(gomega.Equal("/metrics"))
+	g.Expect(endpoint["port"]).To(gomega.Equal("https"))
+	g.Expect(endpoint["scheme"]).To(gomega.Equal("https"))
+
+	// Verify TLS config with CA bundle reference
+	tlsConfig, ok := endpoint["tlsConfig"].(map[string]interface{})
+	g.Expect(ok).To(gomega.BeTrue(), "tlsConfig should be present")
+
+	ca, ok := tlsConfig["ca"].(map[string]interface{})
+	g.Expect(ok).To(gomega.BeTrue(), "tlsConfig.ca should be present")
+
+	configMap, ok := ca["configMap"].(map[string]interface{})
+	g.Expect(ok).To(gomega.BeTrue(), "tlsConfig.ca.configMap should be present")
+	g.Expect(configMap["name"]).To(gomega.Equal("openshift-service-ca.crt"))
+	g.Expect(configMap["key"]).To(gomega.Equal("service-ca.crt"))
+
+	// Verify serverName for certificate validation
+	serverName, ok := tlsConfig["serverName"].(string)
+	g.Expect(ok).To(gomega.BeTrue(), "tlsConfig.serverName should be present")
+	g.Expect(serverName).To(gomega.Equal("mlflow-test-mlflow.opendatahub.svc"))
+
+	// Verify selector matches Service labels
+	matchLabels, found, err := unstructured.NestedStringMap(serviceMonitor.Object, "spec", "selector", "matchLabels")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	g.Expect(matchLabels["app"]).To(gomega.Equal("mlflow-test-mlflow"))
+
+	// On OpenShift, TLS secret should use 0640 (416) since SCC provides fsGroup
+	deployment := findObject(objs, deploymentKind, "mlflow-test-mlflow")
+	g.Expect(deployment).NotTo(gomega.BeNil())
+	volumes, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "volumes")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	foundTLS := false
+	for _, v := range volumes {
+		vol := v.(map[string]interface{})
+		if vol["name"] == "mlflow-tls" {
+			foundTLS = true
+			mode, foundMode, err := unstructured.NestedInt64(vol, "secret", "defaultMode")
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(foundMode).To(gomega.BeTrue(), "defaultMode should be set")
+			g.Expect(mode).To(gomega.Equal(int64(416)), "OpenShift TLS defaultMode should be 0640 (416)")
+		}
+	}
+	g.Expect(foundTLS).To(gomega.BeTrue(), "mlflow-tls volume should be present")
+}
+
+func TestRenderChart_ServiceMonitorInsecureSkipVerify(t *testing.T) {
+	g := gomega.NewWithT(t)
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	// Render on non-OpenShift - should fall back to insecureSkipVerify
+	objs, err := renderer.RenderChart(mlflow, "default", RenderOptions{IsOpenShift: false, ServiceMonitorAvailable: true})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Find the ServiceMonitor
+	var serviceMonitor *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == "ServiceMonitor" {
+			serviceMonitor = obj
+			break
+		}
+	}
+	g.Expect(serviceMonitor).NotTo(gomega.BeNil(), "ServiceMonitor should be rendered when metrics.enabled=true")
+
+	// Verify endpoints configuration
+	endpoints, found, err := unstructured.NestedSlice(serviceMonitor.Object, "spec", "endpoints")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	g.Expect(endpoints).To(gomega.HaveLen(1))
+
+	endpoint := endpoints[0].(map[string]interface{})
+
+	// Verify TLS config falls back to insecureSkipVerify on non-OpenShift
+	tlsConfig, ok := endpoint["tlsConfig"].(map[string]interface{})
+	g.Expect(ok).To(gomega.BeTrue(), "tlsConfig should be present")
+
+	insecureSkipVerify, ok := tlsConfig["insecureSkipVerify"].(bool)
+	g.Expect(ok).To(gomega.BeTrue(), "tlsConfig.insecureSkipVerify should be present")
+	g.Expect(insecureSkipVerify).To(gomega.BeTrue())
+
+	// Verify no CA or serverName is set
+	_, hasCA := tlsConfig["ca"]
+	g.Expect(hasCA).To(gomega.BeFalse(), "tlsConfig.ca should not be present on non-OpenShift")
+
+	_, hasServerName := tlsConfig["serverName"]
+	g.Expect(hasServerName).To(gomega.BeFalse(), "tlsConfig.serverName should not be present on non-OpenShift")
+
+	// On vanilla Kubernetes, TLS secret should use 0644 (420) since there is no fsGroup
+	deployment := findObject(objs, deploymentKind, "mlflow")
+	g.Expect(deployment).NotTo(gomega.BeNil())
+	volumes, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "volumes")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	foundTLS := false
+	for _, v := range volumes {
+		vol := v.(map[string]interface{})
+		if vol["name"] == "mlflow-tls" {
+			foundTLS = true
+			mode, foundMode, err := unstructured.NestedInt64(vol, "secret", "defaultMode")
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(foundMode).To(gomega.BeTrue(), "defaultMode should be set")
+			g.Expect(mode).To(gomega.Equal(int64(420)), "non-OpenShift TLS defaultMode should be 0644 (420)")
+		}
+	}
+	g.Expect(foundTLS).To(gomega.BeTrue(), "mlflow-tls volume should be present")
+}
+
+func TestRenderChart_NetworkPolicy(t *testing.T) {
+	g := gomega.NewWithT(t)
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	// Default: expected egress ports are present
+	objs, err := renderer.RenderChart(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}, "test-ns", RenderOptions{})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	np := findObject(objs, "NetworkPolicy", "mlflow")
+	g.Expect(np).NotTo(BeNil(), "NetworkPolicy should be rendered")
+
+	egress, found, err := unstructured.NestedSlice(np.Object, "spec", "egress")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(found).To(BeTrue())
+	g.Expect(egress).To(HaveLen(5), "should have 5 default egress rules (DNS, HTTPS+K8sAPI, PostgreSQL, MySQL, S3)")
+
+	allPorts := collectEgressPorts(egress)
+	for _, expected := range []int64{53, 443, 6443, 5432, 3306, 9000, 8333} {
+		g.Expect(allPorts).To(ContainElement(expected), "egress should allow port %d", expected)
+	}
+
+	// Additional egress rules are appended
+	objs, err = renderer.RenderChart(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			NetworkPolicyAdditionalEgressRules: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr(corev1.ProtocolTCP),
+							Port:     ptr(intstr.FromInt32(15432)),
+						},
+					},
+				},
+			},
+		},
+	}, "test-ns", RenderOptions{})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	np = findObject(objs, "NetworkPolicy", "mlflow")
+	g.Expect(np).NotTo(BeNil())
+
+	egress, found, err = unstructured.NestedSlice(np.Object, "spec", "egress")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(found).To(BeTrue())
+	g.Expect(egress).To(HaveLen(6), "should have 5 default + 1 additional egress rule")
+	g.Expect(collectEgressPorts(egress)).To(ContainElement(int64(15432)))
+}
+
+func findObject(objs []*unstructured.Unstructured, kind, name string) *unstructured.Unstructured {
+	for _, obj := range objs {
+		if obj.GetKind() == kind && obj.GetName() == name {
+			return obj
+		}
+	}
+	return nil
+}
+
+func collectEgressPorts(egressRules []interface{}) []int64 {
+	var ports []int64
+	for _, rule := range egressRules {
+		ruleMap := rule.(map[string]interface{})
+		rulePorts, ok := ruleMap["ports"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, p := range rulePorts {
+			portMap := p.(map[string]interface{})
+			if port, ok := portMap["port"]; ok {
+				ports = append(ports, port.(int64))
+			}
+		}
+	}
+	return ports
+}
+
+func TestBuildCORSAllowedOrigins(t *testing.T) {
+	tests := []struct {
+		name           string
+		mlflow         *mlflowv1.MLflow
+		namespace      string
+		mlflowURL      string
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name: "default CR name produces correct service origins",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace: "opendatahub",
+			mlflowURL: "https://gateway.example.com",
+			wantContains: []string{
+				"https://mlflow:8443",
+				"https://mlflow.opendatahub.svc:8443",
+				"https://mlflow.opendatahub.svc.cluster.local:8443",
+				"https://gateway.example.com",
+				"localhost:*",
+				"127.0.0.1:*",
+			},
+		},
+		{
+			name: "custom CR name produces suffixed service origins",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "dev"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace: "test-ns",
+			mlflowURL: "https://gateway.example.com",
+			wantContains: []string{
+				"https://mlflow-dev:8443",
+				"https://mlflow-dev.test-ns.svc:8443",
+				"https://mlflow-dev.test-ns.svc.cluster.local:8443",
+			},
+			wantNotContain: []string{
+				"https://mlflow:8443",
+			},
+		},
+		{
+			name: "gateway URL with port preserves port in origin",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace: "opendatahub",
+			mlflowURL: "https://gateway.example.com:9443/mlflow",
+			wantContains: []string{
+				"https://gateway.example.com:9443",
+			},
+			wantNotContain: []string{
+				"https://gateway.example.com:9443/mlflow",
+			},
+		},
+		{
+			name: "empty gateway URL omits gateway origin",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec:       mlflowv1.MLflowSpec{},
+			},
+			namespace: "opendatahub",
+			mlflowURL: "",
+			wantContains: []string{
+				"https://mlflow:8443",
+				"localhost:*",
+			},
+			wantNotContain: []string{
+				"example.com",
+			},
+		},
+		{
+			name: "extraAllowedOrigins are appended",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					ExtraAllowedOrigins: []string{
+						"https://my-app.example.com",
+						"https://jupyter.example.com:8888",
+					},
+				},
+			},
+			namespace: "opendatahub",
+			mlflowURL: "https://gateway.example.com",
+			wantContains: []string{
+				"https://mlflow:8443",
+				"https://gateway.example.com",
+				"https://my-app.example.com",
+				"https://jupyter.example.com:8888",
+			},
+		},
+		{
+			name: "empty and comma-containing extraAllowedOrigins are skipped",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					ExtraAllowedOrigins: []string{
+						"",
+						"  ",
+						"https://a.com,https://b.com",
+						"https://valid.example.com",
+					},
+				},
+			},
+			namespace: "opendatahub",
+			mlflowURL: "https://gateway.example.com",
+			wantContains: []string{
+				"https://valid.example.com",
+			},
+			wantNotContain: []string{
+				"https://a.com",
+				"https://b.com",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+
+			cfg := &config.OperatorConfig{
+				MLflowURL: tt.mlflowURL,
+			}
+
+			result := buildCORSAllowedOrigins(tt.mlflow, tt.namespace, cfg)
+			origins := strings.Split(result, ",")
+			originSet := make(map[string]struct{}, len(origins))
+			for _, o := range origins {
+				originSet[o] = struct{}{}
+			}
+
+			for _, want := range tt.wantContains {
+				_, ok := originSet[want]
+				g.Expect(ok).To(gomega.BeTrue(), "missing origin %q in %q", want, result)
+			}
+			for _, notWant := range tt.wantNotContain {
+				_, ok := originSet[notWant]
+				g.Expect(ok).To(gomega.BeFalse(), "unexpected origin %q in %q", notWant, result)
+			}
+		})
+	}
+}
+
+func TestMlflowToHelmValues_CORSAllowedOrigins(t *testing.T) {
+	g := gomega.NewWithT(t)
+	renderer := &HelmRenderer{}
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	values, err := renderer.mlflowToHelmValues(mlflow, "test-namespace", RenderOptions{})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	mlflowConfig, ok := values["mlflow"].(map[string]interface{})
+	g.Expect(ok).To(gomega.BeTrue(), "mlflow config should be a map")
+
+	corsOrigins, ok := mlflowConfig["corsAllowedOrigins"].(string)
+	g.Expect(ok).To(gomega.BeTrue(), "corsAllowedOrigins should be a string")
+	g.Expect(corsOrigins).NotTo(gomega.BeEmpty())
+	g.Expect(corsOrigins).To(gomega.ContainSubstring("https://mlflow:8443"))
+	g.Expect(corsOrigins).To(gomega.ContainSubstring("https://mlflow.test-namespace.svc:8443"))
+	g.Expect(corsOrigins).To(gomega.ContainSubstring("https://mlflow.test-namespace.svc.cluster.local:8443"))
+	g.Expect(corsOrigins).To(gomega.ContainSubstring("localhost:*"))
+	g.Expect(corsOrigins).To(gomega.ContainSubstring("127.0.0.1:*"))
+}
+
+func TestRenderChart_CORSEnvVar(t *testing.T) {
+	g := gomega.NewWithT(t)
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	g.Expect(deployment).NotTo(gomega.BeNil())
+
+	containers, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+
+	var mlflowContainer map[string]interface{}
+	for _, c := range containers {
+		cm := c.(map[string]interface{})
+		if cm["name"] == "mlflow" {
+			mlflowContainer = cm
+			break
+		}
+	}
+	g.Expect(mlflowContainer).NotTo(gomega.BeNil(), "mlflow container not found")
+	envList := mlflowContainer["env"].([]interface{})
+
+	var corsEnvValue string
+	for _, e := range envList {
+		envMap := e.(map[string]interface{})
+		if envMap["name"] == "MLFLOW_SERVER_CORS_ALLOWED_ORIGINS" {
+			corsEnvValue = envMap["value"].(string)
+			break
+		}
+	}
+
+	g.Expect(corsEnvValue).NotTo(gomega.BeEmpty(), "MLFLOW_SERVER_CORS_ALLOWED_ORIGINS env var should be set")
+	g.Expect(corsEnvValue).To(gomega.ContainSubstring("https://mlflow:8443"))
+	g.Expect(corsEnvValue).To(gomega.ContainSubstring("https://mlflow.test-ns.svc:8443"))
+	g.Expect(corsEnvValue).To(gomega.ContainSubstring("localhost:*"))
 }
 
 // Helper function to create pointers

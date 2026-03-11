@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MLflow Deployment Script for Kind Clusters
+MLflow Deployment Script for Kubernetes Clusters
 
 This script deploys MLflow operator and creates an MLflow instance with configurable
 storage backends (SQLite/PostgreSQL) and artifact storage (file/S3).
@@ -230,8 +230,9 @@ class MLflowDeployer:
         encoded_user = quote_plus(self.args.postgres_user)
         encoded_pass = quote_plus(self.args.postgres_password)
 
-        backend_uri = f"postgresql://{encoded_user}:{encoded_pass}@{self.args.postgres_host}:{self.args.postgres_port}/{self.args.postgres_backend_db}"
-        registry_uri = f"postgresql://{encoded_user}:{encoded_pass}@{self.args.postgres_host}:{self.args.postgres_port}/{self.args.postgres_registry_db}"
+        sslmode_param = f"?sslmode={self.args.postgres_sslmode}" if self.args.postgres_sslmode else ""
+        backend_uri = f"postgresql://{encoded_user}:{encoded_pass}@{self.args.postgres_host}:{self.args.postgres_port}/{self.args.postgres_backend_db}{sslmode_param}"
+        registry_uri = f"postgresql://{encoded_user}:{encoded_pass}@{self.args.postgres_host}:{self.args.postgres_port}/{self.args.postgres_registry_db}{sslmode_param}"
 
         # Delete existing secret if it exists
         self.run_command([
@@ -265,7 +266,14 @@ class MLflowDeployer:
         """Deploy SeaweedFS for S3-compatible storage"""
         print("🌊 Deploying SeaweedFS...")
 
-        seaweedfs_path = self.repo_root / "config" / "overlays" / "kind" / "seaweedfs" / "base"
+        platform_overlay = "openshift" if self.args.platform == "openshift" else "base"
+        seaweedfs_path = self.repo_root / "config" / "seaweedfs" / platform_overlay
+        seaweedfs_params_env = self.repo_root / "config" / "seaweedfs" / "base" / "params.env"
+
+        self.run_command([
+            "sed", "-i", f"s#SEAWEEDFS_IMAGE=.*#SEAWEEDFS_IMAGE={self.args.seaweedfs_image}#",
+            str(seaweedfs_params_env),
+        ], f"Setting seaweedfs image to {self.args.seaweedfs_image}")
 
         # Note: base params.env namespace already updated by deploy_mlflow_operator()
         print(f"📝 SeaweedFS will deploy to namespace '{self.args.namespace}' (from base params.env)")
@@ -473,7 +481,14 @@ class MLflowDeployer:
         """Deploy PostgreSQL for database storage"""
         print("🐘 Deploying PostgreSQL...")
 
-        postgres_path = self.repo_root / "config" / "overlays" / "kind" / "postgres"
+        platform_overlay = "openshift" if self.args.platform == "openshift" else "base"
+        postgres_path = self.repo_root / "config" / "postgres" / platform_overlay
+        postgres_params_env = self.repo_root / "config" / "postgres" / "base" / "params.env"
+
+        self.run_command([
+            "sed", "-i", f"s#POSTGRES_IMAGE=.*#POSTGRES_IMAGE={self.args.postgres_image}#",
+            str(postgres_params_env),
+        ], f"Setting postgres image to {self.args.postgres_image}")
 
         # Note: PostgreSQL overlay doesn't use namespace parameter, so we apply directly to target namespace
         cmd = f"cd {postgres_path} && kustomize build . | kubectl apply -n {self.args.namespace} -f -"
@@ -702,11 +717,6 @@ class MLflowDeployer:
         print(f"   kubectl port-forward service/mlflow 8080:5000 -n {self.args.namespace}")
         print("   Then visit: http://localhost:8080")
 
-        # Set outputs for GitHub Actions
-        if os.getenv('GITHUB_OUTPUT'):
-            with open(os.getenv('GITHUB_OUTPUT'), 'a') as f:
-                f.write(f"mlflow_url=http://localhost:8080\n")
-                f.write(f"namespace={self.args.namespace}\n")
 
     def get_pods_for_deployment(self, deployment_name, namespace):
         """Get pod names for a given deployment"""
@@ -871,7 +881,7 @@ class MLflowDeployer:
 
     def deploy(self):
         """Main deployment orchestration"""
-        print("🚀 Starting MLflow deployment on Kind cluster...")
+        print("🚀 Starting MLflow deployment on Kubernetes cluster...")
         print(f"Configuration:")
         print(f"  Namespace: {self.args.namespace}")
         print(f"  Backend Store: {self.args.backend_store}")
@@ -880,21 +890,38 @@ class MLflowDeployer:
         print(f"  Serve Artifacts: {self.args.serve_artifacts}")
         print()
 
+        # Write all GitHub Actions outputs immediately so they're available even if
+        # deployment fails (e.g. for log collection in downstream steps).
+        if os.getenv('GITHUB_OUTPUT'):
+            with open(os.getenv('GITHUB_OUTPUT'), 'a') as f:
+                f.write(f"namespace={self.args.namespace}\n")
+                f.write("mlflow_url=http://localhost:8080\n")
+                f.write(f"s3_endpoint={self.args.s3_endpoint}\n")
+
         try:
             # Step 1: Create namespace
             self.create_namespace()
 
             # Step 2: Deploy dependencies based on configuration
             if self.args.backend_store == "postgres" or self.args.registry_store == "postgres":
-                self.deploy_postgres()
+                if not self.args.skip_infrastructure:
+                    self.deploy_postgres()
+                else:
+                    print("⏭️  Skipping PostgreSQL deployment (--skip-infrastructure set)")
                 self.create_postgres_secret()
 
             if self.args.artifact_storage == "s3":
                 self.create_s3_secret()
-                self.deploy_seaweedfs()
+                if not self.args.skip_infrastructure:
+                    self.deploy_seaweedfs()
+                else:
+                    print("⏭️  Skipping SeaweedFS deployment (--skip-infrastructure set)")
 
-            # Step 3: Deploy MLflow operator
-            self.deploy_mlflow_operator()
+            # Step 3: Deploy MLflow operator (skipped when operator is already installed)
+            if not self.args.skip_operator:
+                self.deploy_mlflow_operator()
+            else:
+                print("⏭️  Skipping MLflow operator deployment (--skip-operator set)")
 
             # Step 4: Create MLflow CR
             self.deploy_mlflow()
@@ -913,7 +940,7 @@ class MLflowDeployer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Deploy MLflow on Kind cluster")
+    parser = argparse.ArgumentParser(description="Deploy MLflow on Kubernetes cluster")
 
     # Basic configuration
     parser.add_argument("--namespace", default="mlflow",
@@ -922,6 +949,11 @@ def main():
                        help="Full MLflow image name and tag")
     parser.add_argument("--mlflow-operator-image", default="quay.io/opendatahub/mlflow-operator:odh-stable",
                        help="Full MLflow operator image name and tag")
+    parser.add_argument("--skip-operator", action="store_true", default=False,
+                       help="Skip deploying the MLflow operator (assume it is already installed)")
+    parser.add_argument("--skip-infrastructure", action="store_true", default=False,
+                       help="Skip deploying PostgreSQL and SeaweedFS (assume they are pre-existing); "
+                            "credentials secrets are still created")
 
     # Storage configuration
     parser.add_argument("--backend-store", choices=["sqlite", "postgres"],
@@ -938,7 +970,23 @@ def main():
     parser.add_argument("--registry-store-uri", default="sqlite:////mlflow/mlflow.db")
     parser.add_argument("--artifacts-destination", default="file:///mlflow/artifacts")
 
+    # Target platform — selects the appropriate kustomize overlay for infrastructure
+    parser.add_argument("--platform", default="base", choices=["base", "openshift"],
+                       help="Target platform (default: base). Selects the postgres/seaweedfs "
+                            "overlay: 'base' uses the platform-agnostic overlay (ie for Kind "
+                            "or other Kubernetes clusters), 'openshift' uses the "
+                            "OpenShift overlay with platform-specific patches.")
+
+    # Infrastructure images (override to avoid Docker Hub rate limits)
+    parser.add_argument("--postgres-image", default="postgres:13",
+                       help="PostgreSQL container image (default: postgres:13)")
+    parser.add_argument("--seaweedfs-image", default="chrislusf/seaweedfs:4.07",
+                       help="SeaweedFS container image (default: chrislusf/seaweedfs:4.07)")
+
     # PostgreSQL configuration
+    parser.add_argument("--postgres-sslmode", default="disable",
+                       help="PostgreSQL sslmode appended to the connection URI "
+                            "(e.g. disable, require, verify-full). Use empty string to omit.")
     parser.add_argument("--postgres-host", default="")
     parser.add_argument("--postgres-port", default="5432")
     parser.add_argument("--postgres-user", default="postgres")

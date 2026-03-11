@@ -26,6 +26,11 @@ tls:
   # Secret containing TLS certificate and key (tls.crt, tls.key)
   # On OpenShift, this is automatically generated via the service-ca annotation
   secretName: mlflow-tls
+  # File permissions for the TLS secret volume mount (decimal).
+  # 420 (0644) for vanilla Kubernetes (world-readable, needed without fsGroup).
+  # 416 (0640) for OpenShift (group-readable, SCC assigns fsGroup automatically).
+  # The operator sets this automatically based on the detected platform.
+  defaultMode: 420
 
 # MLflow deployment configuration
 replicaCount: 1
@@ -121,6 +126,12 @@ mlflow:
   port: 8443
   # Allowed hosts (will be generated based on routes/services)
   allowedHosts: []
+  # CORS allowed origins (comma-separated list of origins).
+  # When set, configures the MLFLOW_SERVER_CORS_ALLOWED_ORIGINS env var.
+  # The operator populates this automatically with safe defaults (service names, gateway, localhost).
+  # For standalone Helm deployments, set this manually, e.g.:
+  #   corsAllowedOrigins: "https://my-app.example.com,https://localhost:8443"
+  corsAllowedOrigins: ""
   # Static URL prefix for MLflow (e.g., "/mlflow" for proxied deployments)
   # This also gets set as the --root-path for uvicorn in the deployment template.
   # Leave empty for direct access without a prefix
@@ -151,7 +162,10 @@ podSecurityContext:
 # Security context for containers
 securityContext:
   allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
 
 # Service configuration
 service:
@@ -159,6 +173,44 @@ service:
   port: 8443
   # Annotations to add to the service
   annotations: {}
+
+# Metrics and Prometheus configuration
+# When enabled, the --expose-prometheus flag is passed to MLflow and a ServiceMonitor is created.
+# Metrics are served on the main HTTPS port at /metrics endpoint.
+metrics:
+  enabled: true  # Enable Prometheus metrics and ServiceMonitor
+  # TLS configuration for Prometheus scraping
+  # Used to configure how Prometheus verifies the MLflow server's TLS certificate.
+  # If not specified, defaults to insecureSkipVerify: true
+  # Example for proper CA verification:
+  #   tlsConfig:
+  #     ca:
+  #       configMap:
+  #         name: my-ca-bundle
+  #         key: ca.crt
+  #     serverName: mlflow.namespace.svc
+  tlsConfig: {}
+
+# NetworkPolicy configuration
+networkPolicy:
+  # Additional egress rules appended to the default NetworkPolicy.
+  # The default policy permits DNS (53), HTTPS (443), Kubernetes API (6443),
+  # PostgreSQL (5432), MySQL (3306), and S3-compatible storage (MinIO 9000,
+  # SeaweedFS 8333). Add rules here for services running
+  # on non-standard ports or when destination restrictions are needed.
+  additionalEgressRules: []
+  # Example:
+  # additionalEgressRules:
+  #   - ports:
+  #       - protocol: TCP
+  #         port: 15432
+  #   - ports:
+  #       - protocol: TCP
+  #         port: 27017
+  #     to:
+  #       - podSelector:
+  #           matchLabels:
+  #             app: mongodb
 
 # Node selector, tolerations, and affinity
 nodeSelector: {}
