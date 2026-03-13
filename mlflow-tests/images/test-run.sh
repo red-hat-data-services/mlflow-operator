@@ -375,7 +375,7 @@ run_suite() {
                 ;;
         esac
 
-        uv run "$DEPLOY_PY" "${deploy_args[@]}" || return $?
+        uv run --no-sync "$DEPLOY_PY" "${deploy_args[@]}" || return $?
         _OPERATOR_DEPLOYED=true
     fi
 
@@ -439,7 +439,7 @@ run_suite() {
     echo "  Running tests (output: $results_file)..."
     cd "$SCRIPT_DIR/.."
     local suite_exit=0
-    uv run pytest --junit-xml="$results_file" "${PYTEST_ARGS[@]}" || suite_exit=$?
+    uv run --no-sync pytest --junit-xml="$results_file" "${PYTEST_ARGS[@]}" || suite_exit=$?
     cd "$SCRIPT_DIR"
 
     return "$suite_exit"
