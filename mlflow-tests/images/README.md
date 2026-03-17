@@ -121,7 +121,7 @@ The script is configured entirely via environment variables. Variables can also 
 | `MLFLOW_SA_NAME` | `mlflow-sa` | Service account name created by the operator. |
 | `IN_CLUSTER_MODE` | `true` | Set to `false` for local out-of-cluster runs (enables port-forwarding). |
 | `workspaces` | `workspace1-<random>,workspace2-<random>` | Comma-separated list of workspace namespaces to create and test against. |
-| `TEST_RESULTS_DIR` | `/tmp/test-results` | Directory for JUnit XML output. |
+| `TEST_RESULTS_DIR` | `/mlflow/results` | Directory for JUnit XML output. |
 | `DEPLOY_PY` | `<repo>/.github/actions/deploy/deploy.py` | Path to the deploy helper script. |
 
 ## Storage configuration
