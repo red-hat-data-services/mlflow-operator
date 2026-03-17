@@ -34,13 +34,22 @@ EXPOSE 8080
 # Declare working directory
 WORKDIR /mlflow
 
-# Install dependencies
-COPY --chown=1001:1001 ./mlflow-tests/uv.lock .
-COPY --chown=1001:1001 ./mlflow-tests/pyproject.toml .
-COPY --chown=1001:1001 ./mlflow-tests/README.md .
-RUN uv sync
+# Copy lock files and package source before syncing so that uv can install
+# the mlflow-tests package itself (package = true in pyproject.toml requires
+# src/ to be present at sync time).
+COPY --chown=1001:1001 ./mlflow-tests/uv.lock        ./mlflow-tests/
+COPY --chown=1001:1001 ./mlflow-tests/pyproject.toml ./mlflow-tests/
+COPY --chown=1001:1001 ./mlflow-tests/README.md      ./mlflow-tests/
+COPY --chown=1001:1001 ./mlflow-tests/src            ./mlflow-tests/src
 
-# Copy all required package files from the project
+# Install all dependencies + the mlflow_tests package itself.
+# Run from the project root (/mlflow/mlflow-tests) so the venv lands at
+# /mlflow/mlflow-tests/.venv and matches the cwd used by test-run.sh.
+# Unset VIRTUAL_ENV inherited from the base image to avoid uv warnings.
+RUN cd mlflow-tests && VIRTUAL_ENV="" uv sync --locked
+
+# Copy all required package files from the project.
+# COPY merges into the existing directory so the .venv created above is preserved.
 COPY --chown=1001:1001 .github/actions/deploy/deploy.py ./.github/actions/deploy/deploy.py
 COPY --chown=1001:1001 ./config ./config
 COPY --chown=1001:1001 ./mlflow-tests ./mlflow-tests
