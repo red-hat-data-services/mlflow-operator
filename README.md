@@ -129,7 +129,16 @@ The operator will automatically:
 - Create ServiceAccount, RBAC resources (ClusterRole, ClusterRoleBinding)
 - Configure TLS certificates (OpenShift service-ca or manual)
 - Run MLflow with Kubernetes auth enabled and TLS termination in-process
-- Update the CR status with deployment readiness
+- Update the CR status with deployment readiness and access URLs
+
+You can inspect the published MLflow endpoints directly from the custom resource status:
+
+```sh
+kubectl get mlflow mlflow -o jsonpath='{.status.url}{"\n"}{.status.address.url}{"\n"}'
+```
+
+- `status.url` is the external MLflow URL exposed through the data science gateway when Gateway API support is available
+- `status.address.url` is the in-cluster HTTPS URL for the managed MLflow `Service`
 
 ### Standalone Helm Deployment
 
@@ -169,6 +178,8 @@ The operator also creates a shared `mlflow` ClusterRole for the MLflow server po
 See the manifest files for detailed per-resource documentation.
 
 ### Storage Configuration
+
+`backendStoreUri` (or `backendStoreUriFrom`) is required on new creates and updates. To avoid breaking already-stored CRs created before this validation was introduced, the operator still falls back to the legacy implicit SQLite backend during reconciliation when both fields are unset.
 
 #### Local Storage (Development/Testing)
 ```yaml
