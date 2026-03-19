@@ -5,13 +5,85 @@ Each action accepts only test_context as an argument and modifies it appropriate
 """
 
 import logging
-import tempfile
 import os
+import tempfile
+import time
+import uuid
 import mlflow
+from kubernetes import client
+from mlflow.exceptions import MlflowException
+from requests import exceptions as requests_exceptions
 from sklearn.linear_model import LinearRegression
+from mlflow_tests.utils.client import ClientManager
 from ..shared import TestContext
+from ..constants.config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def _get_k8s_clients():
+    """Get Kubernetes API clients."""
+    ClientManager.load_k8s_config()
+    return client.CoreV1Api(), client.CustomObjectsApi()
+
+
+def _require_active_namespace(test_context: TestContext) -> str:
+    """Return the active workspace namespace or raise a clear error."""
+    namespace = test_context.active_workspace
+    if not namespace or not namespace.strip():
+        raise ValueError("test_context.active_workspace must be set before Kubernetes resource actions")
+    return namespace.strip()
+
+
+def _require_artifact_override_s3_config() -> tuple[str, str, str, str]:
+    """Validate the S3 config used by the artifact override test."""
+    access_key = (Config.AWS_ACCESS_KEY or "").strip()
+    secret_key = (Config.AWS_SECRET_KEY or "").strip()
+    s3_url = (Config.S3_URL or "").strip()
+    bucket_name = (Config.S3_BUCKET or "").strip()
+
+    missing = []
+    if not s3_url:
+        missing.append("MLFLOW_S3_ENDPOINT_URL")
+    if not access_key:
+        missing.append("AWS_ACCESS_KEY_ID")
+    if not secret_key:
+        missing.append("AWS_SECRET_ACCESS_KEY")
+    if not bucket_name:
+        missing.append("AWS_S3_BUCKET")
+
+    if missing:
+        missing_vars = ", ".join(missing)
+        raise ValueError(
+            f"Custom artifact override tests require the following environment variables: {missing_vars}"
+        )
+
+    return access_key, secret_key, s3_url, bucket_name
+
+
+def _is_retryable_probe_error(exc: Exception) -> bool:
+    """Return whether a probe failure is likely transient."""
+    if isinstance(
+        exc,
+        (
+            ConnectionError,
+            TimeoutError,
+            requests_exceptions.ConnectionError,
+            requests_exceptions.Timeout,
+        ),
+    ):
+        return True
+
+    if isinstance(exc, MlflowException):
+        return exc.error_code in {
+            "ABORTED",
+            "DEADLINE_EXCEEDED",
+            "DEPLOYMENT_TIMEOUT",
+            "IO_ERROR",
+            "TEMPORARILY_UNAVAILABLE",
+        }
+
+    return False
 
 
 def action_start_run(test_context: TestContext) -> None:
@@ -198,3 +270,166 @@ def action_get_run_info(test_context: TestContext) -> None:
     test_context.artifact_location = run.info.artifact_uri
 
     logger.info(f"Successfully retrieved run info, artifact location: {test_context.artifact_location}")
+
+
+def action_create_artifact_connection_secret(test_context: TestContext) -> None:
+    """Create the mlflow-artifact-connection Secret for custom artifact storage.
+
+    Creates a Secret with S3 credentials in the active workspace namespace.
+
+    Args:
+        test_context: Test context containing active_workspace.
+                     Updates expected_artifact_bucket with the bucket name.
+
+    Raises:
+        Exception: If secret creation fails.
+    """
+    namespace = _require_active_namespace(test_context)
+    secret_name = "mlflow-artifact-connection"
+    access_key, secret_key, s3_url, bucket_name = _require_artifact_override_s3_config()
+
+    logger.info(f"Creating artifact connection secret '{secret_name}' in namespace '{namespace}'")
+
+    core_v1_api, _ = _get_k8s_clients()
+    expected_secret_data = {
+        "AWS_ACCESS_KEY_ID": access_key,
+        "AWS_SECRET_ACCESS_KEY": secret_key,
+        "AWS_S3_BUCKET": bucket_name,
+        "AWS_S3_ENDPOINT": s3_url,
+    }
+
+    secret = client.V1Secret(
+        api_version="v1",
+        kind="Secret",
+        metadata=client.V1ObjectMeta(name=secret_name, namespace=namespace),
+        string_data=expected_secret_data,
+    )
+
+    created_secret = False
+    try:
+        core_v1_api.create_namespaced_secret(namespace=namespace, body=secret)
+        created_secret = True
+        logger.info(f"Successfully created secret '{secret_name}' in namespace '{namespace}'")
+    except client.ApiException as e:
+        if e.status == 409:
+            core_v1_api.patch_namespaced_secret(
+                name=secret_name,
+                namespace=namespace,
+                body={"stringData": expected_secret_data},
+            )
+            logger.info(f"Patched secret '{secret_name}' in namespace '{namespace}'")
+        else:
+            raise
+
+    test_context.expected_artifact_bucket = bucket_name
+    if created_secret:
+        test_context.add_secret_for_cleanup(secret_name, namespace)
+
+
+def action_wait_for_mlflowconfig_active(test_context: TestContext) -> None:
+    """Poll until the MLflowConfig artifact override is picked up by the server.
+
+    Creates and deletes temporary experiments to check if the artifact URI
+    reflects the expected S3 path, retrying with 1s backoff.
+    """
+    namespace = _require_active_namespace(test_context)
+    path = test_context.expected_artifact_path
+    expected_bucket = test_context.expected_artifact_bucket
+    if expected_bucket is None or path is None:
+        raise ValueError(
+            "expected_artifact_bucket and expected_artifact_path must be set before polling "
+            "for MLflowConfig activation"
+        )
+    expected_prefix = f"s3://{expected_bucket}/{path}/"
+
+    logger.info(f"Polling for MLflowConfig to become active (path: '{path}')")
+
+    last_error: Exception | None = None
+    for i in range(10):
+        exp_id = None
+        try:
+            exp_id = mlflow.create_experiment(f"mlflowconfig-probe-{uuid.uuid4().hex}")
+            location = mlflow.get_experiment(exp_id).artifact_location
+
+            if location and location.startswith(expected_prefix):
+                logger.info(f"MLflowConfig active after {i + 1} attempt(s)")
+                return
+        except Exception as exc:
+            if not _is_retryable_probe_error(exc):
+                raise
+            last_error = exc
+            logger.warning(f"Probe attempt {i + 1} failed: {type(exc).__name__}: {exc}")
+        finally:
+            if exp_id is not None:
+                try:
+                    mlflow.delete_experiment(exp_id)
+                except Exception as cleanup_exc:
+                    logger.warning(f"Failed to delete probe experiment {exp_id}: {cleanup_exc}")
+                    test_context.add_experiment_for_cleanup(exp_id, namespace)
+
+        if i < 9:
+            time.sleep(1)
+
+    detail = f" Last error: {last_error}" if last_error else ""
+    raise TimeoutError(f"MLflowConfig artifact override not active after 10s.{detail}")
+
+
+def action_create_mlflowconfig(test_context: TestContext) -> None:
+    """Create an MLflowConfig CR with custom artifact path.
+
+    Args:
+        test_context: Test context containing active_workspace.
+                     Updates expected_artifact_path with the configured path.
+
+    Raises:
+        Exception: If MLflowConfig creation fails.
+    """
+    namespace = _require_active_namespace(test_context)
+    config_name = "mlflow"
+    artifact_path = "custom-artifacts"
+
+    logger.info(f"Creating MLflowConfig '{config_name}' in namespace '{namespace}' with path '{artifact_path}'")
+
+    _, custom_api = _get_k8s_clients()
+
+    mlflowconfig = {
+        "apiVersion": "mlflow.kubeflow.org/v1",
+        "kind": "MLflowConfig",
+        "metadata": {
+            "name": config_name,
+            "namespace": namespace
+        },
+        "spec": {
+            "artifactRootSecret": "mlflow-artifact-connection",
+            "artifactRootPath": artifact_path
+        }
+    }
+
+    created_mlflowconfig = False
+    try:
+        custom_api.create_namespaced_custom_object(
+            group="mlflow.kubeflow.org",
+            version="v1",
+            namespace=namespace,
+            plural="mlflowconfigs",
+            body=mlflowconfig
+        )
+        created_mlflowconfig = True
+        logger.info(f"Successfully created MLflowConfig '{config_name}' in namespace '{namespace}'")
+    except client.ApiException as e:
+        if e.status == 409:
+            custom_api.patch_namespaced_custom_object(
+                group="mlflow.kubeflow.org",
+                version="v1",
+                namespace=namespace,
+                plural="mlflowconfigs",
+                name=config_name,
+                body={"spec": mlflowconfig["spec"]},
+            )
+            logger.info(f"Patched MLflowConfig '{config_name}' in namespace '{namespace}'")
+        else:
+            raise
+
+    test_context.expected_artifact_path = artifact_path
+    if created_mlflowconfig:
+        test_context.add_mlflowconfig_for_cleanup(config_name, namespace)

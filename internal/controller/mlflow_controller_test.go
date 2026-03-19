@@ -63,16 +63,18 @@ var _ = Describe("MLflow Controller", func() {
 			By("creating the custom resource for the Kind MLflow")
 			err = k8sClient.Get(ctx, typeNamespacedName, mlflow)
 			if err != nil && errors.IsNotFound(err) {
+				backendStoreURI := "sqlite:////mlflow/mlflow.db"
 				mlflowResource := &mlflowv1.MLflow{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: resourceName,
 					},
 					Spec: mlflowv1.MLflowSpec{
+						BackendStoreURI: &backendStoreURI,
 						DefaultArtifactRoot: func() *string {
 							val := "s3://default/artifacts"
 							return &val
 						}(),
-						// Storage is required when using default sqlite backend
+						// Storage is required when using sqlite backend
 						Storage: &corev1.PersistentVolumeClaimSpec{
 							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 							Resources: corev1.VolumeResourceRequirements{
@@ -111,6 +113,11 @@ var _ = Describe("MLflow Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(reconcileErr).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
+			Expect(mlflow.Status.URL).To(BeEmpty())
+			Expect(mlflow.Status.Address).NotTo(BeNil())
+			Expect(mlflow.Status.Address.URL).To(Equal("https://mlflow.opendatahub.svc:8443"))
 		})
 
 		It("should create an HTTPRoute with API rewrite when available", func() {
@@ -236,6 +243,76 @@ var _ = Describe("MLflow Controller", func() {
 			Expect(k8sClient.Create(ctx, mlflow)).To(Succeed())
 		})
 
+		It("rejects when backend store is missing", func() {
+			serveArtifactsTrue := true
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					ServeArtifacts: &serveArtifactsTrue,
+				},
+			}
+			err := k8sClient.Create(ctx, mlflow)
+			Expect(errors.IsInvalid(err)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("backendStoreUri or backendStoreUriFrom must be set"))
+		})
+
+		It("allows backendStoreUriFrom without backendStoreUri", func() {
+			serveArtifactsTrue := true
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					ServeArtifacts: &serveArtifactsTrue,
+					BackendStoreURIFrom: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "db-credentials",
+						},
+						Key: "backend-uri",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mlflow)).To(Succeed())
+		})
+
+		It("allows backendStoreUri without backendStoreUriFrom", func() {
+			serveArtifactsTrue := true
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					ServeArtifacts:  &serveArtifactsTrue,
+					BackendStoreURI: &pgStoreURI,
+				},
+			}
+			Expect(k8sClient.Create(ctx, mlflow)).To(Succeed())
+		})
+
+		It("rejects when both backendStoreUri and backendStoreUriFrom are set", func() {
+			serveArtifactsTrue := true
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					ServeArtifacts:  &serveArtifactsTrue,
+					BackendStoreURI: &pgStoreURI,
+					BackendStoreURIFrom: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "db-credentials",
+						},
+						Key: "backend-uri",
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, mlflow)
+			Expect(errors.IsInvalid(err)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("backendStoreUri and backendStoreUriFrom are mutually exclusive"))
+		})
+
 		It("rejects empty networkPolicyAdditionalEgressRules entries", func() {
 			artifactRoot := "s3://bucket/artifacts"
 			proto := corev1.ProtocolTCP
@@ -250,7 +327,7 @@ var _ = Describe("MLflow Controller", func() {
 					RegistryStoreURI:    &pgStoreURI,
 					NetworkPolicyAdditionalEgressRules: []networkingv1.NetworkPolicyEgressRule{
 						{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &proto, Port: &port}}},
-						{}, // empty — should be rejected
+						{}, // empty - should be rejected
 					},
 				},
 			}
