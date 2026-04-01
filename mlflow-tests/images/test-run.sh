@@ -18,6 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+UV_PROJECT_DIR="${UV_PROJECT_DIR:-$REPO_ROOT/mlflow-tests}"
 DEPLOY_PY="${DEPLOY_PY:-$REPO_ROOT/.github/actions/deploy/deploy.py}"
 
 # Source env defaults and CSV-patching helpers
@@ -61,11 +62,22 @@ Storage:
   DB_USER               PostgreSQL user   (default: postgres)
   DB_PASSWORD           PostgreSQL password
   DB_NAME               PostgreSQL database name (default: mydatabase)
-  DB_SSLMODE            sslmode for the connection URI (default: disable)
+  DB_SSLMODE            sslmode for the connection URI (default: 'verify-full' with TLS, 'disable' without)
 
 Infrastructure image overrides:
   POSTGRES_IMAGE        PostgreSQL container image override
   SEAWEEDFS_IMAGE       SeaweedFS container image override
+
+TLS (self-deployed infrastructure):
+  POSTGRES_TLS          true|false — enable TLS on the self-deployed PostgreSQL server (default: false)
+                        When true, sslmode defaults to "verify-full" unless DB_SSLMODE is explicitly set.
+  SEAWEEDFS_TLS         true|false — enable TLS on the self-deployed SeaweedFS S3 endpoint (default: false)
+                        When true, the S3 endpoint scheme is automatically switched to https://.
+                        A self-signed cert is generated on the host via openssl and stored as a K8s Secret.
+  CA_BUNDLE_PATH        Path to a PEM CA bundle file (for externally-provided TLS storage).
+                        Mutually exclusive with CA_BUNDLE_CONFIGMAP.
+  CA_BUNDLE_CONFIGMAP   Name of an existing ConfigMap containing the CA bundle.
+                        Mutually exclusive with CA_BUNDLE_PATH.
 
 Operator / OpenShift:
   DEPLOY_MLFLOW_OPERATOR  true|false — patch the OLM CSV instead of deploying via kustomize;
@@ -163,6 +175,12 @@ fi
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-}"
 SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-}"
 
+# TLS flags for self-deployed infrastructure
+POSTGRES_TLS="${POSTGRES_TLS:-false}"
+SEAWEEDFS_TLS="${SEAWEEDFS_TLS:-false}"
+CA_BUNDLE_PATH="${CA_BUNDLE_PATH:-}"
+CA_BUNDLE_CONFIGMAP="${CA_BUNDLE_CONFIGMAP:-}"
+
 # PostgreSQL sslmode appended to the connection URI.
 # Leave empty to let deploy.py use its default ("disable" for self-deployed postgres).
 DB_SSLMODE="${DB_SSLMODE:-}"
@@ -215,19 +233,40 @@ cleanup() {
         kubectl delete clusterrole "mlflow-config-reader-${MLFLOW_NAME}" --ignore-not-found 2>/dev/null || true
 
         if [ "$SKIP_INFRASTRUCTURE" != "true" ]; then
-            local infra_overlay="$INFRASTRUCTURE_PLATFORM"
+            # Compute per-component overlay directories, accounting for TLS overlays.
+            local postgres_overlay seaweedfs_overlay
+            if [ "${POSTGRES_TLS:-false}" = "true" ]; then
+                [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && postgres_overlay="openshift-tls" || postgres_overlay="tls"
+            else
+                postgres_overlay="$INFRASTRUCTURE_PLATFORM"
+            fi
+            if [ "${SEAWEEDFS_TLS:-false}" = "true" ]; then
+                [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && seaweedfs_overlay="openshift-tls" || seaweedfs_overlay="tls"
+            else
+                seaweedfs_overlay="$INFRASTRUCTURE_PLATFORM"
+            fi
+
             echo "  Removing self-deployed infrastructure..."
-            kustomize build "$REPO_ROOT/config/postgres/$infra_overlay" \
+            kustomize build "$REPO_ROOT/config/postgres/$postgres_overlay" \
                 | kubectl delete --ignore-not-found -n "$NAMESPACE" -f - 2>/dev/null || true
             # Only tear down SeaweedFS if the in-cluster s3 backend was used.
             # externals3 uses an external S3 service that this run did not deploy.
             if echo "$ARTIFACT_BACKENDS" | tr ',' '\n' | grep -qxF 's3'; then
                 export APPLICATION_CRD_ID=mlflow-pipelines \
                        PROFILE_NAMESPACE_LABEL=mlflow-profile \
-                       S3_ADMIN_USER=kind-admin
-                kustomize build "$REPO_ROOT/config/seaweedfs/$infra_overlay" \
-                    | envsubst '$NAMESPACE,$APPLICATION_CRD_ID,$PROFILE_NAMESPACE_LABEL,$S3_ADMIN_USER' \
+                       S3_BUCKET="${BUCKET:-mlpipeline}"
+                kustomize build "$REPO_ROOT/config/seaweedfs/$seaweedfs_overlay" \
+                    | envsubst '$NAMESPACE,$APPLICATION_CRD_ID,$PROFILE_NAMESPACE_LABEL,$S3_BUCKET' \
                     | kubectl delete --ignore-not-found -f - 2>/dev/null || true
+            fi
+
+            # Clean up TLS resources (cert Secrets, CA bundle ConfigMap, DSCI restore)
+            # after infrastructure is torn down to avoid noisy pod errors from missing secrets.
+            if [ "${POSTGRES_TLS:-false}" = "true" ] || [ "${SEAWEEDFS_TLS:-false}" = "true" ]; then
+                local _tls_args=(--namespace "$NAMESPACE")
+                [ "${POSTGRES_TLS:-false}"  = "true" ] && _tls_args+=(--postgres-tls)
+                [ "${SEAWEEDFS_TLS:-false}" = "true" ] && _tls_args+=(--seaweedfs-tls)
+                uv run python3 "$DEPLOY_PY" --cleanup-tls "${_tls_args[@]}" 2>/dev/null || true
             fi
         fi
     fi
@@ -342,6 +381,10 @@ run_suite() {
         [ -n "${POSTGRES_IMAGE:-}"  ] && deploy_args+=(--postgres-image  "$POSTGRES_IMAGE")
         [ -n "${SEAWEEDFS_IMAGE:-}" ] && deploy_args+=(--seaweedfs-image "$SEAWEEDFS_IMAGE")
         [ -n "${DB_SSLMODE:-}"      ] && deploy_args+=(--postgres-sslmode "$DB_SSLMODE")
+        [ "${POSTGRES_TLS:-false}"  = "true" ] && deploy_args+=(--postgres-tls)
+        [ "${SEAWEEDFS_TLS:-false}" = "true" ] && deploy_args+=(--seaweedfs-tls)
+        [ -n "${CA_BUNDLE_PATH:-}"      ] && deploy_args+=(--ca-bundle-path       "$CA_BUNDLE_PATH")
+        [ -n "${CA_BUNDLE_CONFIGMAP:-}" ] && deploy_args+=(--ca-bundle-configmap  "$CA_BUNDLE_CONFIGMAP")
 
         # Skip operator when OLM manages it, when explicitly requested, or when it
         # was already deployed by a previous suite in this run.
@@ -398,7 +441,7 @@ run_suite() {
                 ;;
         esac
 
-        uv run --no-sync "$DEPLOY_PY" "${deploy_args[@]}" || return $?
+        uv run --project "$UV_PROJECT_DIR" --no-sync "$DEPLOY_PY" "${deploy_args[@]}" || return $?
         _OPERATOR_DEPLOYED=true
     fi
 
@@ -473,7 +516,7 @@ run_suite() {
     echo "  Running tests (output: $results_file)..."
     cd "$SCRIPT_DIR/.."
     local suite_exit=0
-    uv run --no-sync pytest --junit-xml="$results_file" "${PYTEST_ARGS[@]}" || suite_exit=$?
+    uv run --project "$UV_PROJECT_DIR" --no-sync pytest --junit-xml="$results_file" "${PYTEST_ARGS[@]}" || suite_exit=$?
     cd "$SCRIPT_DIR"
 
     return "$suite_exit"
