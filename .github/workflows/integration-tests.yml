@@ -156,6 +156,23 @@ jobs:
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
+      - name: Create image pull secret for private registries
+        env:
+          IMAGE_PULL_SECRET: ${{ secrets.QUAY_RHOAI_DOCKER_CONFIG_JSON }}
+        run: |
+          if [ -z "$IMAGE_PULL_SECRET" ]; then
+            echo "ℹ️  No pull secret available (expected for fork PRs) — skipping"
+            exit 0
+          fi
+          kubectl create secret docker-registry mlflow-image-pull-secret \
+            --from-literal=.dockerconfigjson="$IMAGE_PULL_SECRET" \
+            -n "${{ env.NAMESPACE }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl patch serviceaccount default -n "${{ env.NAMESPACE }}" \
+            --type=json \
+            -p '[{"op": "add", "path": "/imagePullSecrets/-", "value": {"name": "mlflow-image-pull-secret"}}]'
+          echo "✅ Image pull secret created"
+
       - name: Deploy MLflow
         id: deploy-mlflow
         uses: ./.github/actions/deploy
