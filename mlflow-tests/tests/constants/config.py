@@ -10,6 +10,7 @@ class Config:
     MLFLOW_URI: str = os.getenv("MLFLOW_TRACKING_URI", "https://localhost:8080")
     DISABLE_TLS: str = os.getenv("DISABLE_TLS", "true")
     CA_BUNDLE: str = os.getenv("ca_bundle", "")
+    REQUEST_TIMEOUT: int = int(os.getenv("MLFLOW_REQUEST_TIMEOUT", "30"))
     ARTIFACT_STORAGE = os.getenv("artifact_storage", "file")
     SERVE_ARTIFACTS = os.getenv("serve_artifacts", "true") == "true"
     AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", "")
@@ -17,6 +18,8 @@ class Config:
     S3_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "")
     S3_BUCKET = os.getenv("AWS_S3_BUCKET", "")
     BACKEND_STORE_URI: str = os.getenv("MLFLOW_BACKEND_STORE_URI", "postgresql://postgres:mysecretpassword@localhost:5432/mydatabase")
+
+    WORKSPACE_LABEL_SELECTOR: str = os.getenv("WORKSPACE_LABEL_SELECTOR", "")
 
     WORKSPACES: list[str] = [
         workspace.strip()

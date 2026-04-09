@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	gomega "github.com/onsi/gomega"
@@ -482,5 +483,225 @@ func TestRenderChart_EnvVars(t *testing.T) {
 	}
 	if !foundConfigMapVar {
 		t.Error("CONFIGMAP_VAR not found in env")
+	}
+}
+
+func TestRenderChart_WorkspaceLabelSelectorEnvVar(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	labelSelector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"mlflow-enabled": "true",
+			"team":           "a",
+		},
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{
+				Key:      "environment",
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"prod", "staging"},
+			},
+		},
+	}
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			WorkspaceLabelSelector: labelSelector,
+		},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{})
+	if err != nil {
+		t.Fatalf("RenderChart() error = %v", err)
+	}
+
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("Deployment not found in rendered objects")
+	}
+
+	containers, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	if err != nil || !found || len(containers) == 0 {
+		t.Fatalf("Failed to get containers from deployment: found=%v, err=%v", found, err)
+	}
+
+	var mlflowContainer map[string]any
+	for _, c := range containers {
+		container := c.(map[string]any)
+		if container["name"] == "mlflow" {
+			mlflowContainer = container
+			break
+		}
+	}
+	if mlflowContainer == nil {
+		t.Fatal("MLflow container not found")
+	}
+
+	env, found, err := unstructured.NestedSlice(mlflowContainer, "env")
+	if err != nil || !found {
+		t.Fatalf("Failed to get env from container: found=%v, err=%v", found, err)
+	}
+
+	var got string
+	for _, e := range env {
+		envVar := e.(map[string]any)
+		if envVar["name"] == "MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR" {
+			got, _ = envVar["value"].(string)
+			break
+		}
+	}
+
+	wantSubstrings := []string{
+		"environment in (prod,staging)",
+		"mlflow-enabled=true",
+		"team=a",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(got, want) {
+			t.Fatalf("MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR=%q missing expected substring %q", got, want)
+		}
+	}
+}
+
+func TestRenderChart_WorkspaceLabelSelectorNilOmitsEnvVar(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-mlflow"},
+		Spec:       mlflowv1.MLflowSpec{},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{})
+	if err != nil {
+		t.Fatalf("RenderChart() error = %v", err)
+	}
+
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("Deployment not found in rendered objects")
+	}
+
+	containers, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	if err != nil || !found || len(containers) == 0 {
+		t.Fatalf("Failed to get containers: found=%v, err=%v", found, err)
+	}
+
+	var mlflowContainer map[string]any
+	for _, c := range containers {
+		container := c.(map[string]any)
+		if container["name"] == "mlflow" {
+			mlflowContainer = container
+			break
+		}
+	}
+	if mlflowContainer == nil {
+		t.Fatal("MLflow container not found")
+	}
+
+	env, found, err := unstructured.NestedSlice(mlflowContainer, "env")
+	if err != nil || !found {
+		t.Fatalf("Failed to get env: found=%v, err=%v", found, err)
+	}
+
+	for _, e := range env {
+		envVar := e.(map[string]any)
+		if envVar["name"] == "MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR" {
+			t.Fatal("MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR should not be present when WorkspaceLabelSelector is nil")
+		}
+	}
+}
+
+func TestRenderChart_WorkspaceLabelSelectorEmptyOmitsEnvVar(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			WorkspaceLabelSelector: &metav1.LabelSelector{},
+		},
+	}
+
+	objs, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{})
+	if err != nil {
+		t.Fatalf("RenderChart() error = %v", err)
+	}
+
+	var deployment *unstructured.Unstructured
+	for _, obj := range objs {
+		if obj.GetKind() == deploymentKind {
+			deployment = obj
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("Deployment not found in rendered objects")
+	}
+
+	containers, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+	if err != nil || !found || len(containers) == 0 {
+		t.Fatalf("Failed to get containers: found=%v, err=%v", found, err)
+	}
+
+	var mlflowContainer map[string]any
+	for _, c := range containers {
+		container := c.(map[string]any)
+		if container["name"] == "mlflow" {
+			mlflowContainer = container
+			break
+		}
+	}
+	if mlflowContainer == nil {
+		t.Fatal("MLflow container not found")
+	}
+
+	env, found, err := unstructured.NestedSlice(mlflowContainer, "env")
+	if err != nil || !found {
+		t.Fatalf("Failed to get env: found=%v, err=%v", found, err)
+	}
+
+	for _, e := range env {
+		envVar := e.(map[string]any)
+		if envVar["name"] == "MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR" {
+			t.Fatal("MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR should not be present when WorkspaceLabelSelector is empty")
+		}
+	}
+}
+
+func TestRenderChart_WorkspaceLabelSelectorInvalidOperatorReturnsError(t *testing.T) {
+	renderer := NewHelmRenderer("../../charts/mlflow")
+
+	mlflow := &mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			WorkspaceLabelSelector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      "env",
+						Operator: metav1.LabelSelectorOperator("InvalidOp"),
+						Values:   []string{"prod"},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := renderer.RenderChart(mlflow, "test-ns", RenderOptions{})
+	if err == nil {
+		t.Fatal("expected RenderChart to return an error for invalid label selector operator")
+	}
+	if !strings.Contains(err.Error(), "workspaceLabelSelector") {
+		t.Fatalf("error should mention workspaceLabelSelector, got: %v", err)
 	}
 }

@@ -46,46 +46,6 @@ Each test follows a consistent execution pattern:
 3. **Switch workspace** to the test workspace
 4. **Execute test steps** — each step runs an action then its paired validation
 
-### Directory Structure
-
-```text
-mlflow-tests/
-├── src/mlflow_tests/          # Core reusable package
-│   ├── enums/                 # Resource and permission definitions
-│   │   ├── resource_type.py   # MLflow resource types (EXPERIMENTS, REGISTERED_MODELS, JOBS, GATEWAY_*)
-│   │   └── kube_verb.py       # Kubernetes verbs (GET, CREATE, LIST, UPDATE, DELETE)
-│   ├── manager/               # Kubernetes user and resource management
-│   │   ├── namespace.py       # Namespace management
-│   │   ├── rbac.py            # K8s role and role binding management
-│   │   ├── service_account.py # ServiceAccount and token management
-│   │   └── user.py            # User creation via ServiceAccounts
-│   └── utils/                 # Utility functions
-│       └── client.py          # Kubernetes and MLflow client factories
-├── tests/                     # Test suite
-│   ├── actions/               # Reusable action functions
-│   │   ├── experiment_actions.py
-│   │   ├── model_actions.py
-│   │   └── artifact_actions.py
-│   ├── validations/           # Validation functions
-│   │   ├── experiment_validations.py
-│   │   ├── model_validations.py
-│   │   ├── artifact_validations.py
-│   │   └── validation_utils.py
-│   ├── shared/                # Test data structures
-│   │   ├── test_context.py    # Runtime state management
-│   │   ├── test_data.py       # TestData and TestStep definitions
-│   │   ├── user_info.py       # User information object
-│   │   └── error_models.py    # Structured error response models
-│   ├── constants/
-│   │   └── config.py          # Configuration from environment variables
-│   ├── base.py                # TestBase class with fixtures and step execution
-│   ├── conftest.py            # Pytest fixtures
-│   ├── test_experiments.py    # Experiment permission tests
-│   ├── test_models.py         # Registered model permission tests
-│   └── test_artifacts.py      # Artifact and model logging tests
-└── pyproject.toml
-```
-
 ## Installation
 
 ```bash
@@ -129,11 +89,13 @@ uv run pytest
 # Run specific test files
 uv run pytest tests/test_experiments.py
 uv run pytest tests/test_models.py
+uv run pytest tests/test_traces.py
 uv run pytest tests/test_artifacts.py
 
 # Run with specific markers
 uv run pytest -m Experiments    # Experiment RBAC tests
 uv run pytest -m Models         # Registered model RBAC tests
+uv run pytest -m Traces         # Trace RBAC and direct trace-ingestion tests
 uv run pytest -m Artifacts      # Artifact operations and S3 storage tests
 uv run pytest -m smoke          # All smoke tests
 
@@ -149,10 +111,11 @@ uv run pytest tests/test_experiments.py -k "GET permission can get experiment"
 
 ### Test Markers
 
-The framework defines four custom pytest markers:
+The framework defines the following custom pytest markers:
 
 - **`@pytest.mark.Experiments`**: Test experiment RBAC and management operations
 - **`@pytest.mark.Models`**: Test registered model RBAC and management operations
+- **`@pytest.mark.Traces`**: Test direct trace-ingestion RBAC and experiment-scoped trace authorization
 - **`@pytest.mark.Artifacts`**: Test artifact operations, model logging, and S3 storage verification
 - **`@pytest.mark.smoke`**: Fast sanity-check tests suitable for pre-merge smoke runs
 
@@ -214,6 +177,7 @@ Tests use specific Kubernetes verbs for granular permission control:
 ### Comprehensive Test Coverage
 - **Experiment Operations**: Create, read, delete experiments with RBAC validation
 - **Model Management**: Registered model lifecycle with permission enforcement
+- **Trace Logging**: Agent-style trace emission with experiment-scoped `get`/`update` and `resourceNames` validation
 - **Artifact Storage**: S3 integration testing for model artifacts and logging operations
 - **Cross-Workspace Security**: Validates users cannot access resources in other workspaces
 - **Permission Matrix**: Tests all role levels against all operations (success and failure scenarios)
@@ -565,7 +529,8 @@ class TestYourNewFeature(TestBase):
                 workspace=test_data.user_info.workspace,
                 verbs=test_data.user_info.verbs,
                 resource_types=test_data.user_info.resource_types,
-                subresources=test_data.user_info.subresources
+                subresources=test_data.user_info.subresources,
+                resource_names=test_data.user_info.resource_names,
             )
             self.test_context.active_user = user_info
             self.test_context.user_client = user_info.client
