@@ -2,6 +2,7 @@ import os
 import logging
 import random
 import string
+from typing import ClassVar
 
 import mlflow
 import pytest
@@ -13,7 +14,15 @@ from mlflow_tests.manager.user import K8UserManager
 from mlflow_tests.manager.namespace import K8Manager
 from mlflow_tests.utils.client import ClientManager
 from .constants.config import Config
-from .shared import TestContext, UserInfo, TestData, ErrorResponse
+from .shared import (
+    ErrorResponse,
+    TestContext,
+    TestData,
+    UserInfo,
+    PRIMARY_RESOURCE_SLOT,
+    get_resource_entry,
+    resolve_resource_name_refs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +79,7 @@ class TestBase:
     admin_client: MlflowClient
     k8_manager: K8Manager
     workspaces: list[str] = list()
-    resource_map: dict[ResourceType, dict[str, list[str] | str]] = dict()
+    resource_map: ClassVar[dict[ResourceType, dict[str, dict[str, dict[str, str]]]]] = {}
     test_context: TestContext
 
     @pytest.fixture(autouse=True)
@@ -84,6 +93,54 @@ class TestBase:
         """Initialize experiments and runs resource map."""
         self.resource_map = create_experiments_and_runs
         self.test_context.resource_map = self.resource_map
+
+    def _set_active_resource_from_map(
+        self,
+        *,
+        resource_type: ResourceType,
+        workspace: str,
+        target_attr: str,
+        value_key: str,
+        slot: str | None = None,
+    ) -> str:
+        """Resolve a baseline resource entry and store it on the test context."""
+        resolved_slot = slot or PRIMARY_RESOURCE_SLOT
+        logger.debug(
+            "Selecting %s resource from slot '%s' in workspace '%s'",
+            resource_type.value,
+            resolved_slot,
+            workspace,
+        )
+        resource_value = get_resource_entry(
+            self.resource_map,
+            resource_type,
+            workspace,
+            slot=resolved_slot,
+        )[value_key]
+        setattr(self.test_context, target_attr, resource_value)
+        return resource_value
+
+    def _set_active_experiment_from_map(
+        self, workspace: str, *, slot: str | None = None
+    ) -> str:
+        """Set the active experiment ID from the shared resource map."""
+        return self._set_active_resource_from_map(
+            resource_type=ResourceType.EXPERIMENTS,
+            workspace=workspace,
+            target_attr="active_experiment_id",
+            value_key="id",
+            slot=slot,
+        )
+
+    def _set_active_model_from_map(self, workspace: str, *, slot: str | None = None) -> str:
+        """Set the active registered model name from the shared resource map."""
+        return self._set_active_resource_from_map(
+            resource_type=ResourceType.REGISTERED_MODELS,
+            workspace=workspace,
+            target_attr="active_model_name",
+            value_key="name",
+            slot=slot,
+        )
 
     @pytest.fixture(autouse=True)
     def admin_user_context(self):
@@ -259,6 +316,19 @@ class TestBase:
                         logger.warning(error_msg)
                         cleanup_errors.append(error_msg)
 
+        # Cleanup namespaces
+        if self.test_context.namespaces_to_delete:
+            namespaces = sorted(self.test_context.namespaces_to_delete)
+            logger.info(f"Cleaning up {len(namespaces)} test namespace(s)")
+            for namespace in namespaces:
+                try:
+                    logger.info(f"Deleting test namespace: {namespace}")
+                    self.k8_manager.delete_namespace(namespace)
+                except Exception as e:
+                    error_msg = f"Failed to delete test namespace {namespace}: {e}"
+                    logger.warning(error_msg)
+                    cleanup_errors.append(error_msg)
+
         # Restore original workspace if it was set
         if original_workspace:
             try:
@@ -317,7 +387,14 @@ class TestBase:
             cleanup_errors.append(error_msg)
             return False
 
-    def _create_user(self, workspace: str, verbs: list[KubeVerb], resource_types: list[ResourceType], subresources: list[str]=None) -> UserInfo:
+    def _create_user(
+        self,
+        workspace: str,
+        verbs: list[KubeVerb],
+        resource_types: list[ResourceType],
+        subresources: list[str] | None = None,
+        resource_names: dict[ResourceType, list[str]] | None = None,
+    ) -> UserInfo:
         """Create user with permissions and authenticated client.
 
         Args:
@@ -325,6 +402,7 @@ class TestBase:
             verbs: List of Kubernetes verbs to grant
             resource_types: List of resource types to grant access to
             subresources: Optional list of subresources
+            resource_names: Optional mapping of resource type to allowed names
 
         Returns:
             UserInfo object with user credentials and workspace
@@ -338,8 +416,13 @@ class TestBase:
         username = f"test-user-{random_suffix}"
         logger.info(f"Creating test user '{username}' in workspace '{workspace}'")
         verb_names = [verb.value for verb in verbs] if isinstance(verbs, list) else [verbs.value]
-        resource_names = [rt.value for rt in resource_types]
-        logger.debug(f"User will have {verb_names} verbs on {resource_names}")
+        resource_type_names = [rt.value for rt in resource_types]
+        resolved_resource_names = resolve_resource_name_refs(
+            self.resource_map,
+            workspace,
+            resource_names,
+        )
+        logger.debug(f"User will have {verb_names} verbs on {resource_type_names}")
 
         # Create the user
         user_info = self.user_manager.create_user(username=username, namespace=workspace)
@@ -354,15 +437,16 @@ class TestBase:
         logger.info(f"User '{username}' token validation passed")
 
         # Create role and permissions
-        logger.debug(f"Assigning {verb_names} verbs on {resource_names} to user '{username}'")
+        logger.debug(f"Assigning {verb_names} verbs on {resource_type_names} to user '{username}'")
         self.user_manager.create_role(
             name=username,
             workspace_name=workspace,
             verbs=verbs if isinstance(verbs, list) else [verbs],
             resources=resource_types,
-            subresources=subresources
+            subresources=subresources,
+            resource_names=resolved_resource_names,
         )
-        logger.info(f"Assigned {verb_names} permissions on {resource_names} to user '{username}'")
+        logger.info(f"Assigned {verb_names} permissions on {resource_type_names} to user '{username}'")
 
         # Set authentication context and get authenticated client
         logger.debug(f"Setting authentication context for user '{username}'")
@@ -377,6 +461,7 @@ class TestBase:
             resource_types=resource_types,
             verbs=verbs if isinstance(verbs, list) else [verbs],
             subresources=subresources,
+            resource_names=resolved_resource_names,
             client=authenticated_client
         )
 
@@ -416,6 +501,7 @@ class TestBase:
 
         for i, step in enumerate(test_steps, 1):
             logger.info(f"--- Test Step {i} ---")
+            self.test_context.last_error = None
 
             if step.user_info:
                 # Step 2: Create user with permissions
@@ -424,7 +510,8 @@ class TestBase:
                     workspace=step.user_info.workspace,
                     verbs=step.user_info.verbs,
                     resource_types=step.user_info.resource_types,
-                    subresources=step.user_info.subresources
+                    subresources=step.user_info.subresources,
+                    resource_names=step.user_info.resource_names,
                 )
                 logger.info(f"Created user: {user_info.uname}")
                 self.test_context.active_user = user_info
@@ -432,6 +519,7 @@ class TestBase:
                 logger.debug(f"Created authenticated MLflow client for user: {user_info.uname}")
 
             if step.workspace_to_use:
+                self.test_context.active_workspace = step.workspace_to_use
                 mlflow.set_workspace(step.workspace_to_use)
 
             # Execute action if present (don't stop on failure - validation will check if it was expected)
@@ -494,8 +582,14 @@ class TestBase:
 
         # Generic error handling: if action failed and this is not an "expected failure" validation,
         # show the actual action error instead of letting validation give misleading messages
-        if (self.test_context.last_error is not None and
-            validation_name != 'validate_authentication_denied'):
+        if (
+            self.test_context.last_error is not None
+            and validation_name
+            not in {
+                "validate_authentication_denied",
+                "validate_authentication_denied_or_resource_not_found",
+            }
+        ):
 
             error_response = self.test_context.last_error
             user_name = self.test_context.active_user.uname if self.test_context.active_user else "unknown"

@@ -29,6 +29,12 @@ from .artifact_actions import (
     action_create_mlflowconfig,
     action_wait_for_mlflowconfig_active,
 )
+from .trace_actions import (
+    action_post_trace_v3_direct,
+)
+from .workspace_actions import (
+    action_list_workspaces,
+)
 
 __all__ = [
     "action_get_experiment",
@@ -50,4 +56,6 @@ __all__ = [
     "action_create_artifact_connection_secret",
     "action_create_mlflowconfig",
     "action_wait_for_mlflowconfig_active",
+    "action_post_trace_v3_direct",
+    "action_list_workspaces",
 ]
