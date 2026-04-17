@@ -708,6 +708,7 @@ class MLflowDeployer:
                 f"--timeout=300s -n {self.args.namespace}",
                 "Waiting for PostgreSQL deployment to be available"
             )
+
         except Exception as e:
             print(f"❌ PostgreSQL deployment failed to become ready: {e}")
             self.debug_deployment("postgres-deployment", self.args.namespace)
