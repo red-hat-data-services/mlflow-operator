@@ -68,6 +68,8 @@ make generate
 
 **Note**: Always regenerate manifests and code after modifying API types. CI will verify that generated code is up-to-date.
 
+When bumping the supported MLflow version, update `config/component_metadata.yaml`, then rerun the version-alignment verification. The Makefile parses `config/component_metadata.yaml` and injects `SupportedMLflowVersion` via Go `-ldflags`; the Dockerfile resolves the same value by calling `make print-supported-mlflow-version` during the image build. Top-level `scripts/` is preferred for developer-maintenance helpers like this; `test/scripts/` is reserved for test validation helpers.
+
 ## Deployment Modes
 
 The MLflow operator supports two deployment modes, configured via the `--mode` flag:
@@ -101,6 +103,7 @@ kustomize build config/overlays/odh | kubectl apply -f -
 ## Helm Chart
 
 The operator uses Helm charts to manage MLflow resources. The chart is located in `charts/mlflow/` and can be used standalone or via the operator.
+Standalone Helm deployments must not orchestrate database migrations; migration orchestration is operator-only.
 
 ## Helm Chart and MLflowSpec parity
 
@@ -129,6 +132,7 @@ charts/mlflow/
     ├── rbac.yaml
     ├── pvc.yaml
     ├── deployment.yaml           # MLflow server with kubernetes-auth and TLS
+    ├── cronjob.yaml              # Garbage collection CronJob
     └── service.yaml
 ```
 
@@ -152,8 +156,8 @@ The MLflow CR spec fields map directly to Helm chart values. See example configu
 
 MLflow has three independent storage components:
 
-1. **Backend Store** (experiment metadata): Supports `file://`, `sqlite://`, `postgresql://`, `mysql://`
-2. **Registry Store** (model registry metadata): Same schemes as backend store
+1. **Backend Store** (experiment metadata): Inline `backendStoreUri` supports `sqlite://` and `postgresql://`
+2. **Registry Store** (model registry metadata): Inline `registryStoreUri` supports the same SQL schemes as `backendStoreUri`
 3. **Artifacts Destination** (artifacts storage): Supports `file://`, `s3://`, `gs://`, `wasbs://`, `hdfs://`
 
 The `storage` field in the MLflow CR is **optional** and only needed for file-based storage:
@@ -174,9 +178,15 @@ Local storage (requires PVC):
 ```yaml
 spec:
   storage:
-    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 10Gi
   backendStoreUri: "sqlite:////mlflow/mlflow.db"
+  registryStoreUri: "sqlite:////mlflow/mlflow.db"
   artifactsDestination: "file:///mlflow/artifacts"
+  serveArtifacts: true
 ```
 
 Remote storage (no PVC):
@@ -185,10 +195,35 @@ spec:
   # No storage field needed
   backendStoreUri: "postgresql://user:pass@host:5432/mlflow"
   artifactsDestination: "s3://my-bucket/artifacts"
+  defaultArtifactRoot: "s3://my-bucket/artifacts/runs"
+  serveArtifacts: true
+  # Add an explicit networkPolicyAdditionalEgressRules entry when the artifact
+  # store needs non-default ports or destination-specific restrictions.
+  networkPolicyAdditionalEgressRules:
+    - ports:
+        - protocol: TCP
+          port: 443
   envFrom:
     - secretRef:
         name: aws-credentials
 ```
+
+### Operator-managed database migration
+
+- `spec.migration.mode` controls operator-managed migration behavior:
+  - `Automatic` (default) runs the migration Job on bootstrap and whenever `status.version` differs from the operator-supported MLflow version
+  - `Always` reruns the migration flow for each new desired generation, meaning each new revision of the MLflow resource after its desired state changes, before the MLflow Deployment is scaled back up
+- `spec.migration.ttlSecondsAfterFinished` optionally overrides how long finished operator-managed migration Jobs are retained before Kubernetes TTL cleanup may remove them; when omitted, the operator defaults to 86400 seconds (24 hours), and values below 3600 seconds (1 hour) are rejected
+- Finished migration Jobs can therefore remain visible for up to 24 hours in shared namespaces such as `redhat-ods-applications`, which is intentional so admins have time to inspect logs after upgrades
+- `status.version` records the last supported MLflow version that successfully completed the operator-managed migration/deploy flow
+- The `Migration` status condition records the per-generation migration state via `observedGeneration`: `Unknown` while migration is in progress or retrying after a transient failure, `True` after success, and `False` after a terminal failure
+- Operator-managed migration only supports documented SQL metadata store URIs (`sqlite://`, `postgresql://`) for backend and registry stores; inline `file://` metadata URIs are intentionally rejected and are not supported for operator-managed migration
+- If `spec.image.image` overrides the default image, the operator still uses that image for the migration Job to support hotfix and test images, but it does not prevalidate the custom image's migration runtime contract before scale-down; an incompatible custom image can therefore fail after the MLflow Deployment has been scaled down and cause downtime
+- The operator-managed migration Job verifies that the resolved MLflow image reports `SupportedMLflowVersion` before it advances `status.version`
+- Kubernetes Job retries remain finite, but the operator recreates fresh migration Jobs after a short delay for retryable failures such as transient connectivity problems; terminal failures such as version mismatches, unsupported metadata store URIs, or known Alembic revision-resolution errors stop automatic retries
+- For ODH/RHOAI MLflow images that ship `mlflow.store.db.migration_gap`, the operator-managed migration Job runs the backend-only RHOAI `3.3 -> 3.4` gap repair before the generic MLflow migration logic; this replaced the earlier Deployment init-container approach
+- The presence-based `mlflow.opendatahub.io/force-migrate` annotation forces a one-shot migration; the operator clears it after a successful forced run, and if a finished Job already exists for the current desired generation, the operator deletes it first so it can create the replacement Job with the same generated name. Terminal migration failures instruct admins to use that annotation after fixing the issue.
+- When backend and registry store URIs differ, the migration Job must handle them independently and only advance `status.version` after both succeed
 
 ## Testing
 
@@ -210,6 +245,7 @@ make test-e2e-full
 
 `make test-e2e` expects an already-running Kubernetes cluster and does not create one.
 `make test-e2e-full` creates a Kind cluster (`KIND_CLUSTER`, default `mlflow`), builds/loads the image, and runs e2e tests.
+`make test-e2e-upgrade` runs the upgrade-focused e2e suite against an existing cluster and expects `MLFLOW_SEED_IMAGE` to point at an MLflow `3.10.0` seed image. The GitHub workflow deploys a `3.10.0`-compatible operator image plus a running MLflow `3.10.0` instance, and the upgrade Ginkgo test then scales the operator down, clears the MLflow image override, switches the operator Deployment to the current image, and scales the operator back up before verifying the operator-managed migration flow.
 Cluster cleanup is a separate step:
 
 ```bash
@@ -221,6 +257,9 @@ Quick workflow:
 ```bash
 # Full e2e run against Kind
 make test-e2e-full
+
+# Upgrade-focused e2e run against an existing cluster
+make test-e2e-upgrade MLFLOW_SEED_IMAGE=localhost/mlflow-seed:3.10.0
 
 # Cleanup when done
 make cleanup-kind-cluster
@@ -261,11 +300,14 @@ The `config/samples/` directory contains example MLflow custom resource configur
    - Manual TLS certificate management
    - Shows upstreamCASecret configuration
 
-4. **mlflow_v1_mlflow_remote_storage.yaml** - Remote storage
+4. **mlflow_v1_mlflow_remote_storage.yaml** - Remote storage with garbage collection
    - PostgreSQL for metadata
    - S3 for artifacts
    - No PVC required (fully remote)
    - Multi-replica deployment
+   - Periodic garbage collection via CronJob
+   - `mlflow-gc-sa` ServiceAccount for the CronJob
+   - `mlflow-gc` ClusterRole and ClusterRoleBinding for the CronJob
 
 5. **mlflow_v1_mlflow_digest.yaml** - Digest-based images
    - Uses SHA256 image digests for reproducibility
@@ -366,6 +408,8 @@ Validates sample CRs on every PR:
 - `test.yml` - Runs unit tests
 - `lint.yml` - Runs golangci-lint
 - `integration-tests.yml` - Builds the operator image from this repo for all runs, but only builds the MLflow image from the aligned branch of `red-hat-data-services/mlflow` using `Dockerfile.konflux` for `red-hat-data-services` `rhoai-*` branches; other branches continue using the existing Quay image selection
+- `upgrade-tests.yml` - Deploys a `3.10.0`-compatible operator image and a running MLflow `3.10.0` instance; the upgrade Ginkgo test then performs the operator image upgrade and verifies the operator-managed upgrade flow against the current supported MLflow version
+- `verify-mlflow-version-alignment.yml` - Verifies the floating default MLflow image still matches the supported operator version on PRs targeting `main`, pushes to `main`, and a daily schedule in `opendatahub-io/mlflow-operator`
 - `test-e2e.yml` - Runs end-to-end tests
 - `verify-kustomize.yml` - Validates kustomize overlays
 

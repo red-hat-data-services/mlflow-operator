@@ -24,11 +24,13 @@ import (
 	consolev1 "github.com/openshift/api/console/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -101,6 +103,35 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Handle deletion - all resources are cleaned up via owner references
 	if mlflow.GetDeletionTimestamp() != nil {
 		return ctrl.Result{}, nil
+	}
+
+	// Clean up GC resources when garbage collection is disabled.
+	if mlflow.Spec.GarbageCollection == nil {
+		gcSuffix := "-gc" + getResourceSuffix(mlflow.Name)
+		gcResources := []struct {
+			obj  client.Object
+			name string
+			ns   string
+		}{
+			{&batchv1.CronJob{}, ResourceName + gcSuffix, targetNamespace},
+			{&corev1.ServiceAccount{}, GCServiceAccountName, targetNamespace},
+			{&rbacv1.ClusterRoleBinding{}, ResourceName + gcSuffix, ""},
+			{&rbacv1.ClusterRole{}, ResourceName + gcSuffix, ""},
+		}
+		for _, res := range gcResources {
+			key := types.NamespacedName{Name: res.name, Namespace: res.ns}
+			existing := res.obj.DeepCopyObject().(client.Object)
+			if err := r.Get(ctx, key, existing); err == nil {
+				if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
+					log.Error(err, "Failed to delete GC resource", "kind", existing.GetObjectKind().GroupVersionKind().Kind, "name", res.name)
+					return ctrl.Result{}, err
+				}
+				log.Info("Deleted GC resource", "kind", existing.GetObjectKind().GroupVersionKind().Kind, "name", res.name)
+			} else if !errors.IsNotFound(err) {
+				log.Error(err, "Failed to check for GC resource", "name", res.name)
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
 	// Validate user-provided CA bundle ConfigMap if specified
@@ -195,48 +226,34 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	// Apply rendered manifests
-	for _, obj := range objects {
-		// MLflow CR is cluster-scoped so set owner reference for all resources
-		if obj.GetKind() != "Namespace" {
-			// For the shared "mlflow" ClusterRole, append owner references instead of using
-			// SetControllerReference which only allows one controller owner. This allows
-			// multiple MLflow instances to share the same ClusterRole.
-			if obj.GetKind() == "ClusterRole" && obj.GetName() == ClusterRoleName {
-				if err := r.appendOwnerReference(ctx, mlflow, obj); err != nil {
-					log.Error(err, "Failed to append owner reference", "object", obj.GetKind(), "name", obj.GetName())
-					// Continue with other objects
-					continue
-				}
-			} else {
-				if err := controllerutil.SetControllerReference(mlflow, obj, r.Scheme); err != nil {
-					log.Error(err, "Failed to set controller reference", "object", obj.GetKind(), "name", obj.GetName())
-					// Continue with other objects
-					continue
-				}
-			}
+	if result, handled, err := r.handleMigration(ctx, mlflow, targetNamespace, objects); err != nil {
+		log.Error(err, "Failed to reconcile migration")
+		if statusErr := r.recordMigrationError(ctx, mlflow, "MigrationError", fmt.Sprintf("Failed to reconcile migration: %v", err)); statusErr != nil {
+			log.Error(statusErr, "Failed to update MLflow status after retries")
 		}
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
+	}
 
-		// Apply the object
-		if err := r.applyObject(ctx, obj); err != nil {
-			log.Error(err, "Failed to apply object", "kind", obj.GetKind(), "name", obj.GetName())
-			meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
-				Type:    "Available",
-				Status:  metav1.ConditionFalse,
-				Reason:  "ApplyFailed",
-				Message: fmt.Sprintf("Failed to apply %s/%s: %v", obj.GetKind(), obj.GetName(), err),
-			})
-			meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
-				Type:    "Progressing",
-				Status:  metav1.ConditionFalse,
-				Reason:  "ApplyFailed",
-				Message: fmt.Sprintf("Failed to apply resources: %v", err),
-			})
-			if statusErr := r.updateStatus(ctx, mlflow); statusErr != nil {
-				log.Error(statusErr, "Failed to update MLflow status after retries")
-			}
-			return ctrl.Result{}, err
+	if err := r.applyRenderedObjects(ctx, mlflow, objects); err != nil {
+		log.Error(err, "Failed to apply rendered objects")
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Available",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ApplyFailed",
+			Message: fmt.Sprintf("Failed to apply resources: %v", err),
+		})
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Progressing",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ApplyFailed",
+			Message: fmt.Sprintf("Failed to apply resources: %v", err),
+		})
+		if statusErr := r.updateStatus(ctx, mlflow); statusErr != nil {
+			log.Error(statusErr, "Failed to update MLflow status after retries")
 		}
+		return ctrl.Result{}, err
 	}
 
 	// Reconcile ConsoleLink (if available in cluster)
@@ -298,6 +315,19 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// 1. Desired replicas > 0 (not scaled down)
 	// 2. All desired replicas are ready
 	if desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas {
+		migrationJob := &batchv1.Job{}
+		jobErr := r.Get(ctx, types.NamespacedName{Name: migrationJobName(mlflow), Namespace: targetNamespace}, migrationJob)
+		switch {
+		case jobErr == nil && isJobSuccessful(migrationJob):
+			if err := r.markMigrationSuccessful(ctx, mlflow); err != nil {
+				log.Error(err, "Failed to finalize migration status after rollout became ready")
+				return ctrl.Result{}, err
+			}
+		case jobErr != nil && !errors.IsNotFound(jobErr):
+			log.Error(jobErr, "Failed to get migration Job")
+			return ctrl.Result{}, jobErr
+		}
+
 		// Deployment is ready
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
 			Type:    "Available",
@@ -321,6 +351,12 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			Type:    "Available",
 			Status:  metav1.ConditionFalse,
 			Reason:  "DeploymentNotReady",
+			Message: message,
+		})
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Progressing",
+			Status:  metav1.ConditionTrue,
+			Reason:  "DeploymentProgressing",
 			Message: message,
 		})
 		// Keep requeuing until ready
@@ -377,6 +413,8 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&mlflowv1.MLflow{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&batchv1.Job{}).
+		Owns(&batchv1.CronJob{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
@@ -423,6 +461,31 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return builder.Complete(r)
+}
+
+func (r *MLflowReconciler) applyRenderedObjects(ctx context.Context, mlflow *mlflowv1.MLflow, objects []*unstructured.Unstructured) error {
+	log := logf.FromContext(ctx)
+	for _, obj := range objects {
+		if obj.GetKind() != "Namespace" {
+			if obj.GetKind() == "ClusterRole" && obj.GetName() == ClusterRoleName {
+				if err := r.appendOwnerReference(ctx, mlflow, obj); err != nil {
+					log.Error(err, "Failed to append owner reference", "object", obj.GetKind(), "name", obj.GetName())
+					return fmt.Errorf("append owner reference to %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+				}
+			} else {
+				if err := controllerutil.SetControllerReference(mlflow, obj, r.Scheme); err != nil {
+					log.Error(err, "Failed to set controller reference", "object", obj.GetKind(), "name", obj.GetName())
+					return fmt.Errorf("set controller reference on %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+				}
+			}
+		}
+
+		if err := r.applyObject(ctx, obj); err != nil {
+			log.Error(err, "Failed to apply object", "kind", obj.GetKind(), "name", obj.GetName())
+			return fmt.Errorf("apply %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+	}
+	return nil
 }
 
 // clusterRoleToMLflowRequests maps ClusterRole events to MLflow reconcile requests.
