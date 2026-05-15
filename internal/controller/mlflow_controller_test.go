@@ -21,8 +21,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
@@ -87,6 +89,9 @@ var _ = Describe("MLflow Controller", func() {
 				}
 				Expect(k8sClient.Create(ctx, mlflowResource)).To(Succeed())
 			}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
+			mlflow.Status.Version = SupportedMLflowVersion
+			Expect(k8sClient.Status().Update(ctx, mlflow)).To(Succeed())
 		})
 
 		AfterEach(func() {
@@ -117,10 +122,76 @@ var _ = Describe("MLflow Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
 			Expect(mlflow.Status.URL).To(BeEmpty())
 			Expect(mlflow.Status.Address).NotTo(BeNil())
-			Expect(mlflow.Status.Address.URL).To(Equal("https://mlflow.opendatahub.svc:8443"))
+			Expect(mlflow.Status.Address.URL).To(Equal("https://mlflow.opendatahub.svc:8443/mlflow"))
 		})
 
-		It("should create an HTTPRoute with API rewrite when available", func() {
+		It("should delete GC CronJob when garbageCollection is removed from spec", func() {
+			By("Enabling garbage collection")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
+			mlflow.Spec.GarbageCollection = &mlflowv1.GarbageCollectionSpec{
+				Schedule: "0 2 * * 0",
+			}
+			Expect(k8sClient.Update(ctx, mlflow)).To(Succeed())
+
+			controllerReconciler := &MLflowReconciler{
+				Client:               k8sClient,
+				Scheme:               k8sClient.Scheme(),
+				Namespace:            "opendatahub",
+				ChartPath:            "../../charts/mlflow",
+				ConsoleLinkAvailable: false,
+				HTTPRouteAvailable:   false,
+			}
+
+			By("Reconciling to create the CronJob")
+			_, reconcileErr := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(reconcileErr).NotTo(HaveOccurred())
+
+			gcCronJob := &batchv1.CronJob{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "mlflow-gc",
+				Namespace: "opendatahub",
+			}, gcCronJob)).To(Succeed())
+
+			By("Disabling garbage collection")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
+			mlflow.Spec.GarbageCollection = nil
+			Expect(k8sClient.Update(ctx, mlflow)).To(Succeed())
+
+			By("Reconciling to delete the CronJob")
+			_, reconcileErr = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(reconcileErr).NotTo(HaveOccurred())
+
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "mlflow-gc",
+				Namespace: "opendatahub",
+			}, gcCronJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			gcServiceAccount := &corev1.ServiceAccount{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      GCServiceAccountName,
+				Namespace: "opendatahub",
+			}, gcServiceAccount)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			gcClusterRoleBinding := &rbacv1.ClusterRoleBinding{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: "mlflow-gc",
+			}, gcClusterRoleBinding)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			gcClusterRole := &rbacv1.ClusterRole{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: "mlflow-gc",
+			}, gcClusterRole)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should create an HTTPRoute with v1 rewrite when available", func() {
 			By("Reconciling the created resource with HTTPRoute enabled")
 
 			controllerReconciler := &MLflowReconciler{
@@ -143,31 +214,9 @@ var _ = Describe("MLflow Controller", func() {
 				Namespace: controllerReconciler.Namespace,
 			}, httpRoute)).To(Succeed())
 
-			Expect(httpRoute.Spec.Rules).To(HaveLen(3))
+			Expect(httpRoute.Spec.Rules).To(HaveLen(2))
 
-			apiRule := httpRoute.Spec.Rules[0]
-			Expect(apiRule.Matches).To(HaveLen(1))
-			Expect(apiRule.Matches[0].Path).NotTo(BeNil())
-			Expect(apiRule.Matches[0].Path.Value).NotTo(BeNil())
-			Expect(*apiRule.Matches[0].Path.Value).To(Equal("/" + ResourceName + "/api"))
-
-			Expect(apiRule.Filters).To(HaveLen(1))
-			Expect(apiRule.Filters[0].Type).To(Equal(gatewayv1.HTTPRouteFilterURLRewrite))
-			Expect(apiRule.Filters[0].URLRewrite).NotTo(BeNil())
-			Expect(apiRule.Filters[0].URLRewrite.Path).NotTo(BeNil())
-			Expect(apiRule.Filters[0].URLRewrite.Path.Type).To(Equal(gatewayv1.PrefixMatchHTTPPathModifier))
-			Expect(apiRule.Filters[0].URLRewrite.Path.ReplacePrefixMatch).NotTo(BeNil())
-			Expect(*apiRule.Filters[0].URLRewrite.Path.ReplacePrefixMatch).To(Equal("/api"))
-
-			Expect(apiRule.BackendRefs).To(HaveLen(1))
-			apiBackend := apiRule.BackendRefs[0]
-			Expect(apiBackend.BackendRef.BackendObjectReference.Name).To(Equal(gatewayv1.ObjectName(ResourceName)))
-			Expect(apiBackend.BackendRef.Port).NotTo(BeNil())
-			Expect(int(*apiBackend.BackendRef.Port)).To(Equal(8443))
-			Expect(apiBackend.BackendRef.Weight).NotTo(BeNil())
-			Expect(*apiBackend.BackendRef.Weight).To(Equal(int32(1)))
-
-			v1Rule := httpRoute.Spec.Rules[1]
+			v1Rule := httpRoute.Spec.Rules[0]
 			Expect(v1Rule.Matches).To(HaveLen(1))
 			Expect(v1Rule.Matches[0].Path).NotTo(BeNil())
 			Expect(v1Rule.Matches[0].Path.Value).NotTo(BeNil())
@@ -189,7 +238,7 @@ var _ = Describe("MLflow Controller", func() {
 			Expect(v1Backend.BackendRef.Weight).NotTo(BeNil())
 			Expect(*v1Backend.BackendRef.Weight).To(Equal(int32(1)))
 
-			rootRule := httpRoute.Spec.Rules[2]
+			rootRule := httpRoute.Spec.Rules[1]
 			Expect(rootRule.Matches).To(HaveLen(1))
 			Expect(rootRule.Matches[0].Path).NotTo(BeNil())
 			Expect(rootRule.Matches[0].Path.Value).NotTo(BeNil())
@@ -334,6 +383,26 @@ var _ = Describe("MLflow Controller", func() {
 			err := k8sClient.Create(ctx, mlflow)
 			Expect(errors.IsInvalid(err)).To(BeTrue())
 			Expect(err.Error()).To(ContainSubstring("must specify at least one port or one destination"))
+		})
+
+		It("rejects empty olderThan in garbageCollection", func() {
+			artifactRoot := "s3://bucket/artifacts"
+			emptyOlderThan := ""
+			mlflow := &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName,
+				},
+				Spec: mlflowv1.MLflowSpec{
+					DefaultArtifactRoot: &artifactRoot,
+					BackendStoreURI:     &pgStoreURI,
+					GarbageCollection: &mlflowv1.GarbageCollectionSpec{
+						Schedule:  "0 2 * * 0",
+						OlderThan: &emptyOlderThan,
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, mlflow)
+			Expect(errors.IsInvalid(err)).To(BeTrue())
 		})
 
 		It("rejects MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE env var", func() {
