@@ -48,7 +48,7 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	egress, found, err := unstructured.NestedSlice(np.Object, "spec", "egress")
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(found).To(gomega.BeTrue())
-	g.Expect(egress).To(gomega.HaveLen(6), "should have 6 default egress rules (DNS, in-cluster HTTPS, Kubernetes API, PostgreSQL, MySQL, S3)")
+	g.Expect(egress).To(gomega.HaveLen(5), "should have 5 default egress rules (DNS, HTTPS, PostgreSQL, MySQL, S3)")
 
 	allPorts := collectEgressPorts(egress)
 	for _, expected := range []int64{53, 443, 8443, 6443, 5432, 3306, 9000, 8333, 8334} {
@@ -56,15 +56,12 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	}
 
 	httpsRules := findEgressRulesByPort(egress, 443)
-	g.Expect(httpsRules).To(gomega.HaveLen(1), "default policy should expose exactly one HTTPS rule")
-
-	toPeers, ok := httpsRules[0]["to"].([]interface{})
-	g.Expect(ok).To(gomega.BeTrue(), "default HTTPS rule should be restricted to cluster destinations")
-	g.Expect(toPeers).To(gomega.HaveLen(1))
-	peer, ok := toPeers[0].(map[string]interface{})
-	g.Expect(ok).To(gomega.BeTrue())
-	g.Expect(peer).To(gomega.HaveKey("namespaceSelector"))
-	g.Expect(peer["namespaceSelector"]).To(gomega.Equal(map[string]interface{}{}))
+	g.Expect(httpsRules).To(gomega.HaveLen(1), "default policy should have one HTTPS egress rule")
+	g.Expect(httpsRules[0]).NotTo(gomega.HaveKey("to"), "HTTPS egress rule should be unrestricted by destination")
+	httpsRulePorts := collectRulePorts(httpsRules[0])
+	for _, p := range []int64{443, 6443, 8443} {
+		g.Expect(httpsRulePorts).To(gomega.ContainElement(p), "HTTPS egress rule should include port %d", p)
+	}
 
 	// Additional egress rules are appended
 	objs, err = renderer.RenderChart(&mlflowv1.MLflow{
@@ -91,9 +88,9 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	egress, found, err = unstructured.NestedSlice(np.Object, "spec", "egress")
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(found).To(gomega.BeTrue())
-	g.Expect(egress).To(gomega.HaveLen(7), "should have 6 default + 1 additional egress rule")
+	g.Expect(egress).To(gomega.HaveLen(6), "should have 5 default + 1 additional egress rule")
 
 	httpsRules = findEgressRulesByPort(egress, 443)
-	g.Expect(httpsRules).To(gomega.HaveLen(2), "admin should be able to opt in to external HTTPS egress")
+	g.Expect(httpsRules).To(gomega.HaveLen(2), "should have the default unrestricted HTTPS rule plus the additional rule")
 	g.Expect(httpsRules[1]).NotTo(gomega.HaveKey("to"), "additional HTTPS rule should remain unrestricted unless configured otherwise")
 }
