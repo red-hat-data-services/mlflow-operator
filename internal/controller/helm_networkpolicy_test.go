@@ -65,7 +65,7 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	egress, found, err := unstructured.NestedSlice(np.Object, "spec", "egress")
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(found).To(gomega.BeTrue())
-	g.Expect(egress).To(gomega.HaveLen(6), "should have 6 default egress rules (DNS, in-cluster HTTPS, Kubernetes API, PostgreSQL, MySQL, S3)")
+	g.Expect(egress).To(gomega.HaveLen(5), "should have 5 default egress rules (DNS, HTTPS, PostgreSQL, MySQL, S3)")
 
 	allPorts := collectEgressPorts(egress)
 	for _, expected := range []int64{53, 443, 8443, 6443, 5432, 3306, 9000, 8333, 8334} {
@@ -73,23 +73,12 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	}
 
 	httpsRules := findEgressRulesByPort(egress, 443)
-	g.Expect(httpsRules).To(gomega.HaveLen(1), "default policy should expose only the cluster-internal HTTPS rule on 443")
-
-	var clusterHTTPSRule map[string]interface{}
-	for _, rule := range httpsRules {
-		if _, hasTo := rule["to"]; hasTo {
-			clusterHTTPSRule = rule
-		}
+	g.Expect(httpsRules).To(gomega.HaveLen(1), "default policy should have one HTTPS egress rule")
+	g.Expect(httpsRules[0]).NotTo(gomega.HaveKey("to"), "HTTPS egress rule should be unrestricted by destination")
+	httpsRulePorts := collectRulePorts(httpsRules[0])
+	for _, p := range []int64{443, 6443, 8443} {
+		g.Expect(httpsRulePorts).To(gomega.ContainElement(p), "HTTPS egress rule should include port %d", p)
 	}
-	g.Expect(clusterHTTPSRule).NotTo(gomega.BeNil(), "default policy should keep the cluster-internal HTTPS rule")
-
-	toPeers, ok := clusterHTTPSRule["to"].([]interface{})
-	g.Expect(ok).To(gomega.BeTrue(), "cluster HTTPS rule should be restricted to cluster destinations")
-	g.Expect(toPeers).To(gomega.HaveLen(1))
-	peer, ok := toPeers[0].(map[string]interface{})
-	g.Expect(ok).To(gomega.BeTrue())
-	g.Expect(peer).To(gomega.HaveKey("namespaceSelector"))
-	g.Expect(peer["namespaceSelector"]).To(gomega.Equal(map[string]interface{}{}))
 
 	// Additional egress rules are appended
 	objs, err = renderer.RenderChart(&mlflowv1.MLflow{
@@ -116,10 +105,10 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	egress, found, err = unstructured.NestedSlice(np.Object, "spec", "egress")
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(found).To(gomega.BeTrue())
-	g.Expect(egress).To(gomega.HaveLen(7), "should have 6 default + 1 additional egress rule")
+	g.Expect(egress).To(gomega.HaveLen(6), "should have 5 default + 1 additional egress rule")
 
 	httpsRules = findEgressRulesByPort(egress, 443)
-	g.Expect(httpsRules).To(gomega.HaveLen(2), "admin should be able to opt in to unrestricted HTTPS egress on top of the default cluster-internal rule")
+	g.Expect(httpsRules).To(gomega.HaveLen(2), "should have the default unrestricted HTTPS rule plus the additional rule")
 	g.Expect(httpsRules[1]).NotTo(gomega.HaveKey("to"), "additional HTTPS rule should remain unrestricted unless configured otherwise")
 
 	migrationNP = findObject(objs, "NetworkPolicy", "mlflow-migration")
@@ -129,4 +118,95 @@ func TestRenderChart_NetworkPolicy(t *testing.T) {
 	g.Expect(found).To(gomega.BeTrue())
 	g.Expect(migrationEgress).To(gomega.HaveLen(3), "migration NetworkPolicy should have 2 default + 1 additional egress rule")
 	g.Expect(collectEgressPorts(migrationEgress)).To(gomega.ContainElement(int64(443)))
+
+	// Full egress override replaces all default rules
+	objs, err = renderer.RenderChart(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			BackendStoreURI: ptr(testBackendStoreURI),
+			NetworkPolicyEgressRules: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr(corev1.ProtocolUDP),
+							Port:     ptr(intstr.FromInt32(53)),
+						},
+					},
+				},
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr(corev1.ProtocolTCP),
+							Port:     ptr(intstr.FromInt32(443)),
+						},
+					},
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							IPBlock: &networkingv1.IPBlock{
+								CIDR: "10.0.0.0/8",
+							},
+						},
+					},
+				},
+			},
+		},
+	}, "test-ns", RenderOptions{})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	np = findObject(objs, "NetworkPolicy", "mlflow")
+	g.Expect(np).NotTo(gomega.BeNil())
+
+	egress, found, err = unstructured.NestedSlice(np.Object, "spec", "egress")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	g.Expect(egress).To(gomega.HaveLen(2), "custom egressRules should replace all defaults")
+
+	overridePorts := collectEgressPorts(egress)
+	g.Expect(overridePorts).To(gomega.ConsistOf(int64(53), int64(443)), "only the custom ports should be present")
+	for _, absent := range []int64{6443, 8443, 5432, 3306, 9000} {
+		g.Expect(overridePorts).NotTo(gomega.ContainElement(absent), "default port %d should be absent when egressRules overrides", absent)
+	}
+
+	// Override + append: custom base with additional rules appended
+	objs, err = renderer.RenderChart(&mlflowv1.MLflow{
+		ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+		Spec: mlflowv1.MLflowSpec{
+			BackendStoreURI: ptr(testBackendStoreURI),
+			NetworkPolicyEgressRules: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr(corev1.ProtocolUDP),
+							Port:     ptr(intstr.FromInt32(53)),
+						},
+					},
+				},
+			},
+			NetworkPolicyAdditionalEgressRules: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: ptr(corev1.ProtocolTCP),
+							Port:     ptr(intstr.FromInt32(9999)),
+						},
+					},
+				},
+			},
+		},
+	}, "test-ns", RenderOptions{})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	np = findObject(objs, "NetworkPolicy", "mlflow")
+	g.Expect(np).NotTo(gomega.BeNil())
+
+	egress, found, err = unstructured.NestedSlice(np.Object, "spec", "egress")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+	g.Expect(egress).To(gomega.HaveLen(2), "should have 1 custom base + 1 appended additional rule")
+
+	combinedPorts := collectEgressPorts(egress)
+	g.Expect(combinedPorts).To(gomega.ConsistOf(int64(53), int64(9999)), "should contain custom base port and appended additional port")
+	for _, absent := range []int64{443, 6443, 8443, 5432, 3306, 9000} {
+		g.Expect(combinedPorts).NotTo(gomega.ContainElement(absent), "default port %d should not reappear when egressRules overrides", absent)
+	}
 }

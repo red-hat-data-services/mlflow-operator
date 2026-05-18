@@ -27,6 +27,9 @@ spec:
         # so cluster-internal reachability on this port is acceptable.
         - namespaceSelector: {}
   egress:
+    {{- if .Values.networkPolicy.egressRules }}
+    {{- toYaml .Values.networkPolicy.egressRules | nindent 4 }}
+    {{- else }}
     # DNS resolution (port 53 is the Service port; 5353 is the CoreDNS
     # target port used by OpenShift — OVN-Kubernetes evaluates egress rules
     # after DNAT, so both ports must be allowed)
@@ -39,24 +42,17 @@ spec:
           port: 5353
         - protocol: TCP
           port: 5353
-    # HTTPS to cluster-internal pods and Services. Allow both the common
-    # Service port (443) and the common non-root container port (8443).
-    # Use networkPolicy.additionalEgressRules when you need external HTTPS
-    # egress or destination-specific restrictions.
+    # HTTPS (443, 6443, 8443). Left unrestricted by destination because
+    # MLflow commonly reaches services outside pod/service CIDRs: the
+    # Kubernetes API server (host-network), external object stores
+    # (S3, GCS, Azure Blob), and external databases over TLS.
     - ports:
         - protocol: TCP
           port: 443
         - protocol: TCP
-          port: 8443
-      to:
-        - namespaceSelector: {}
-    # Kubernetes API. Leave this unrestricted by destination because the API
-    # server is commonly reached on host-network IPs outside pod/service CIDRs.
-    # Clusters that expose the API on 443 must opt in explicitly with an
-    # additional egress rule.
-    - ports:
-        - protocol: TCP
           port: 6443
+        - protocol: TCP
+          port: 8443
     # PostgreSQL
     - ports:
         - protocol: TCP
@@ -73,6 +69,7 @@ spec:
           port: 8333
         - protocol: TCP
           port: 8334
+    {{- end }}
     {{- with .Values.networkPolicy.additionalEgressRules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
