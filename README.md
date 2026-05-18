@@ -253,17 +253,12 @@ helm install mlflow . --set mlflow.corsAllowedOrigins="https://my-app.example.co
 
 The operator automatically creates a NetworkPolicy that:
 - **Ingress**: Allows traffic to the MLflow HTTPS port (8443) from any pod in the cluster
-- **Egress**: Allows DNS (ports 53 and 5353), in-cluster HTTPS (ports 443 and 8443 to cluster-internal pods and Services), Kubernetes API (port 6443), PostgreSQL (port 5432), MySQL (port 3306), and S3-compatible object storage (MinIO port 9000, SeaweedFS ports 8333 and 8334)
+- **Egress**: Allows DNS (ports 53 and 5353), HTTPS (ports 443, 6443, and 8443 to any destination), PostgreSQL (port 5432), MySQL (port 3306), and S3-compatible object storage (MinIO port 9000, SeaweedFS ports 8333 and 8334)
 
-External HTTPS egress is not allowed by default. If your deployment needs external HTTPS access or non-standard ports, add additional egress rules:
+Use `networkPolicyAdditionalEgressRules` when you need egress on non-default ports or destination-specific restrictions:
 ```yaml
 spec:
   networkPolicyAdditionalEgressRules:
-    # Explicit admin opt-in for external HTTPS egress.
-    # Add `to` peers or CIDRs when you can narrow the destination set.
-    - ports:
-        - protocol: TCP
-          port: 443
     - ports:
         - protocol: TCP
           port: 15432
