@@ -407,6 +407,7 @@ Validates sample CRs on every PR:
 
 **When modifying workflows:**
 - Follow existing patterns and naming conventions
+- Always pin external GitHub Actions or reusable workflow references to immutable commit SHAs rather than floating tags or branches; resolve the current SHA programmatically when updating them
 - Update AGENTS.md if adding new validation requirements
 - Test workflow changes in a fork before merging
 
