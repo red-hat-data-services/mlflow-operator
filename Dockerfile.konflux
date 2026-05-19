@@ -2,6 +2,7 @@
 FROM registry.access.redhat.com/ubi9/go-toolset@sha256:90a36bc2013b3fcb28e2a4b082c9b895d7c2c679e58b95aed9721970f3339d0e AS builder
 ARG TARGETOS
 ARG TARGETARCH
+ARG SUPPORTED_MLFLOW_VERSION_OVERRIDE=""
 
 USER root
 
@@ -24,7 +25,11 @@ COPY . .
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GO111MODULE=on GOEXPERIMENT=strictfipsruntime go build -tags strictfipsruntime -a -o manager cmd/main.go
+RUN SUPPORTED_MLFLOW_VERSION="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE="${SUPPORTED_MLFLOW_VERSION_OVERRIDE}" make -s print-supported-mlflow-version)" && \
+    test -n "${SUPPORTED_MLFLOW_VERSION}" && \
+    GO_LDFLAGS="-X github.com/opendatahub-io/mlflow-operator/internal/controller.SupportedMLflowVersion=${SUPPORTED_MLFLOW_VERSION}" && \
+      CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GO111MODULE=on \
+        GOEXPERIMENT=strictfipsruntime go build -ldflags "${GO_LDFLAGS}" -tags strictfipsruntime -a -o manager cmd/main.go
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:12db9874bd753eb98b1ab3d840e75de5d6842ac0604fbd68c012adefe97140be
 WORKDIR /
