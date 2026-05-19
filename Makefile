@@ -155,7 +155,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-arg SUPPORTED_MLFLOW_VERSION_OVERRIDE="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE)" -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg SUPPORTED_MLFLOW_VERSION_OVERRIDE="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE)" -t ${IMG} -f Dockerfile.konflux .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -171,7 +171,7 @@ PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile.konflux > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name mlflow-operator-builder
 	$(CONTAINER_TOOL) buildx use mlflow-operator-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg CGO_ENABLED=$(CGO_ENABLED) --build-arg SUPPORTED_MLFLOW_VERSION_OVERRIDE="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE)" --tag ${IMG} -f Dockerfile.cross .
