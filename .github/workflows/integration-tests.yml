@@ -89,20 +89,25 @@ jobs:
         shell: bash
         env:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
-          REQUESTED_REF: ${{ github.head_ref || github.ref_name }}
+          TARGET_REF: ${{ github.base_ref || github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$REPOSITORY_OWNER" == "red-hat-data-services" ]]; then
             SOURCE_REPOSITORY="red-hat-data-services/mlflow"
-            DEFAULT_REF="main"
           else
             SOURCE_REPOSITORY="opendatahub-io/mlflow"
-            DEFAULT_REF="master"
           fi
 
-          SOURCE_REF="$DEFAULT_REF"
-          if [[ -n "$REQUESTED_REF" ]] && git ls-remote --exit-code --heads "https://github.com/${SOURCE_REPOSITORY}.git" "$REQUESTED_REF" >/dev/null 2>&1; then
-            SOURCE_REF="$REQUESTED_REF"
+          # Build the MLflow branch that corresponds to the operator branch under test.
+          # Examples:
+          # - ODH PR to operator main -> opendatahub-io/mlflow master
+          # - ODH PR to operator release-3.4 -> opendatahub-io/mlflow release-3.4
+          # - RHDS PR to operator main -> red-hat-data-services/mlflow main
+          # - RHDS PR to operator rhoai-3.4 -> red-hat-data-services/mlflow rhoai-3.4
+          if [[ "$REPOSITORY_OWNER" == "opendatahub-io" && "$TARGET_REF" == "main" ]]; then
+            SOURCE_REF="master"
+          else
+            SOURCE_REF="$TARGET_REF"
           fi
 
           echo "source_repository=$SOURCE_REPOSITORY" >> "$GITHUB_OUTPUT"
@@ -511,6 +516,7 @@ jobs:
           done <<'EOF'
           app=mlflow|
           control-plane=controller-manager|-operator
+          mlflow.opendatahub.io/migration-job=true|-migration
           app=seaweedfs|-seaweedfs
           app=mlflow-postgres|-postgres
           EOF
@@ -733,6 +739,7 @@ jobs:
           done <<'EOF'
           app=mlflow|
           control-plane=controller-manager|-operator
+          mlflow.opendatahub.io/migration-job=true|-migration
           app=seaweedfs|-seaweedfs
           app=mlflow-postgres|-postgres
           EOF
