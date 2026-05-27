@@ -239,7 +239,7 @@ make test-e2e-full
 
 `make test-e2e` expects an already-running Kubernetes cluster and does not create one.
 `make test-e2e-full` creates a Kind cluster (`KIND_CLUSTER`, default `mlflow`), builds/loads the image, and runs e2e tests.
-`make test-e2e-upgrade` runs the upgrade-focused e2e suite against an existing cluster and expects `MLFLOW_SEED_IMAGE` to point at an MLflow `3.10.0` seed image. The GitHub workflow deploys a `3.10.0`-compatible operator image plus a running MLflow `3.10.0` instance, and the upgrade Ginkgo test then scales the operator down, clears the MLflow image override, switches the operator Deployment to the current image, and scales the operator back up before verifying the operator-managed migration flow.
+`make test-e2e-upgrade` runs the upgrade-focused e2e suite against an existing cluster and expects `MLFLOW_SEED_IMAGE` to point at a known-good MLflow `3.10.1` seed image. The default is pinned to the ODH release 1.1 digest (`v3.10.1+rhaiv.3`) so the upgrade path does not depend on rebuilding an intermediate seed image during test setup. The GitHub workflow deploys a `3.10.1`-compatible operator image plus a running MLflow `3.10.1` instance, and the upgrade Ginkgo test then scales the operator down, clears the MLflow image override, switches the operator Deployment to the current image, and scales the operator back up before verifying the operator-managed migration flow.
 Cluster cleanup is a separate step:
 
 ```bash
@@ -253,7 +253,7 @@ Quick workflow:
 make test-e2e-full
 
 # Upgrade-focused e2e run against an existing cluster
-make test-e2e-upgrade MLFLOW_SEED_IMAGE=localhost/mlflow-seed:3.10.0
+make test-e2e-upgrade MLFLOW_SEED_IMAGE=quay.io/opendatahub/mlflow@sha256:ad51bbd7f770491da88dc1db3b3c84f7471d25c48026ecb385180b63b18f4c64
 
 # Cleanup when done
 make cleanup-kind-cluster
@@ -401,14 +401,14 @@ Validates sample CRs on every PR:
 - `verify-codegen.yml` - Validates generated code is up-to-date
 - `test.yml` - Runs unit tests
 - `lint.yml` - Runs golangci-lint
-- `integration-tests.yml` - Builds the operator image from this repo for all runs, but only builds the MLflow image from the aligned branch of `red-hat-data-services/mlflow` using `Dockerfile.konflux` for `red-hat-data-services` `rhoai-*` branches; other branches continue using the existing Quay image selection
-- `upgrade-tests.yml` - Deploys a `3.10.0`-compatible operator image and a running MLflow `3.10.0` instance; the upgrade Ginkgo test then performs the operator image upgrade and verifies the operator-managed upgrade flow against the current supported MLflow version
-- `verify-mlflow-version-alignment.yml` - Verifies the floating default MLflow image still matches the supported operator version on PRs targeting `main`, pushes to `main`, and a daily schedule in `opendatahub-io/mlflow-operator`
+- `integration-tests.yml` - Unified MLflow runtime workflow for push, pull request, and manual runs. It builds one operator image artifact from this repository and one MLflow runtime image artifact from the matching owner MLflow repository, using the target operator branch under test (`github.base_ref || github.ref_name`) as the MLflow ref. The one intentional exception is ODH default-branch parity: operator `main` maps to `opendatahub-io/mlflow@master`. The operator image build uses `Dockerfile.konflux` when that file exists in the checked-out branch and falls back to `Dockerfile` otherwise. Upgrade tests use a pinned ODH release 1.1 seed image digest (`v3.10.1+rhaiv.3`) instead of rebuilding `test/e2e/images/mlflow-3.10.0.Dockerfile`, which was removed after its `microdnf`-based Python reinstall started pulling an incompatible sqlite runtime; the workflow now retags that digest to a local seed tag before `kind load` and deployment so containerd does not have to resolve the digest-only reference during container creation. Built-image version alignment remains RHDS-only, and ODH push/PR activity targeting `main` still verifies the default image version from the checked-out repo without depending on the runtime-image build job. Failed integration and upgrade jobs also upload debug artifacts with namespace snapshots plus operator, MLflow, and migration-job pod logs and descriptions when available.
+- `verify-mlflow-version-alignment.yml` - Scheduled ODH-only default-image alignment check. It runs directly from the checked-out operator repo and verifies the `config/base/params.env` plus `config/overlays/kind/params.env` defaults against the supported MLflow version metadata without instantiating the heavier integration workflow.
 - `test-e2e.yml` - Runs end-to-end tests
 - `verify-kustomize.yml` - Validates kustomize overlays
 
 **When modifying workflows:**
 - Follow existing patterns and naming conventions
+- Always pin external GitHub Actions or reusable workflow references to immutable commit SHAs rather than floating tags or branches; resolve the current SHA programmatically when updating them
 - Update AGENTS.md if adding new validation requirements
 - Test workflow changes in a fork before merging
 
