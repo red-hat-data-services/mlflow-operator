@@ -1,5 +1,8 @@
 name: MLflow Runtime Integration Tests
 
+# This workflow owns push, pull request, and manual MLflow runtime validation.
+# The scheduled ODH default-image alignment check lives in verify-mlflow-version-alignment.yml.
+
 env:
   NAMESPACE: 'opendatahub'
   INTEGRATION_CLUSTER_NAME: 'mlflow'
@@ -65,9 +68,6 @@ on:
         default: true
         type: boolean
 
-  schedule:
-    - cron: '0 10 * * *'
-
   push:
     branches:
       - main
@@ -76,13 +76,11 @@ on:
 
 jobs:
   build-mlflow-runtime-image:
-    if: ${{ github.event_name != 'schedule' }}
     permissions:
       contents: read
     name: Build MLflow runtime image
     runs-on: ubuntu-latest
     outputs:
-      built: ${{ steps.configure.outputs.built }}
       source_repository: ${{ steps.configure.outputs.source_repository }}
       source_ref: ${{ steps.configure.outputs.source_ref }}
     steps:
@@ -92,7 +90,6 @@ jobs:
         env:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           TARGET_REF: ${{ github.base_ref || github.ref_name }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$REPOSITORY_OWNER" == "red-hat-data-services" ]]; then
             SOURCE_REPOSITORY="red-hat-data-services/mlflow"
@@ -114,14 +111,8 @@ jobs:
 
           echo "source_repository=$SOURCE_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
-          if [[ "$EVENT_NAME" != "schedule" ]]; then
-            echo "built=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "built=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Checkout MLflow source
-        if: ${{ steps.configure.outputs.built == 'true' }}
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           repository: ${{ steps.configure.outputs.source_repository }}
@@ -130,7 +121,6 @@ jobs:
           persist-credentials: false
 
       - name: Resolve MLflow Dockerfile
-        if: ${{ steps.configure.outputs.built == 'true' }}
         id: resolve-mlflow-dockerfile
         shell: bash
         run: |
@@ -141,7 +131,6 @@ jobs:
           fi
 
       - name: Build MLflow image archive
-        if: ${{ steps.configure.outputs.built == 'true' }}
         shell: bash
         run: |
           mkdir -p runtime-image
@@ -149,7 +138,6 @@ jobs:
           docker save -o "runtime-image/${{ env.MLFLOW_RUNTIME_ARTIFACT }}.tar" "${{ env.MLFLOW_RUNTIME_IMAGE }}"
 
       - name: Upload MLflow image artifact
-        if: ${{ steps.configure.outputs.built == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ env.MLFLOW_RUNTIME_ARTIFACT }}
@@ -157,7 +145,6 @@ jobs:
           retention-days: 1
 
   build-mlflow-operator-image:
-    if: ${{ github.event_name != 'schedule' }}
     permissions:
       contents: read
     name: Build MLflow operator image
@@ -194,7 +181,6 @@ jobs:
 
   integration-tests:
     needs: [build-mlflow-runtime-image, build-mlflow-operator-image]
-    if: ${{ github.event_name != 'schedule' }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -537,7 +523,7 @@ jobs:
         run: exit 1
 
   verify-built-mlflow-version-alignment:
-    if: ${{ github.event_name != 'workflow_dispatch' && github.repository_owner == 'red-hat-data-services' && github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'workflow_dispatch' && github.repository_owner == 'red-hat-data-services' }}
     needs: build-mlflow-runtime-image
     permissions:
       contents: read
@@ -565,7 +551,7 @@ jobs:
             --mlflow-image "${{ env.MLFLOW_RUNTIME_IMAGE }}"
 
   verify-default-mlflow-version-alignment:
-    if: ${{ github.event_name != 'workflow_dispatch' && github.repository_owner == 'opendatahub-io' && (github.event_name == 'schedule' || github.ref_name == 'main' || github.base_ref == 'main') }}
+    if: ${{ github.event_name != 'workflow_dispatch' && github.repository_owner == 'opendatahub-io' && (github.ref_name == 'main' || github.base_ref == 'main') }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -583,7 +569,7 @@ jobs:
             --params-env config/overlays/kind/params.env
 
   upgrade-tests:
-    if: ${{ github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'workflow_dispatch' }}
     needs: [build-mlflow-runtime-image, build-mlflow-operator-image]
     name: Run upgrade path (${{ matrix.backend_store }})
     runs-on: ubuntu-latest
