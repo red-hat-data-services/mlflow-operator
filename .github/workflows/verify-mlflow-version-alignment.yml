@@ -1,30 +1,11 @@
 name: Verify MLflow Version Alignment
 
+# This workflow exists for the scheduled ODH default-image alignment check.
+# Push and pull request validation for the same defaults lives in integration-tests.yml.
+
 on:
   schedule:
-    - cron: "0 10 * * *"
-  pull_request:
-    branches:
-      - "main"
-    paths:
-      - ".github/workflows/verify-mlflow-version-alignment.yml"
-      - "config/base/params.env"
-      - "config/overlays/kind/params.env"
-      - "config/component_metadata.yaml"
-      - "Dockerfile"
-      - "Makefile"
-      - "test/scripts/verify_mlflow_version_alignment.py"
-  push:
-    branches:
-      - "main"
-    paths:
-      - ".github/workflows/verify-mlflow-version-alignment.yml"
-      - "config/base/params.env"
-      - "config/overlays/kind/params.env"
-      - "config/component_metadata.yaml"
-      - "Dockerfile"
-      - "Makefile"
-      - "test/scripts/verify_mlflow_version_alignment.py"
+    - cron: '0 10 * * *'
 
 jobs:
   verify-mlflow-version-alignment:
@@ -34,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Verify default MLflow image version alignment
         shell: bash
