@@ -931,8 +931,11 @@ class MLflowDeployer:
                 except Exception as e:
                     print(f"❌ Failed to get operator pod description for {pod_name}: {e}")
 
-                # Get logs if pod is ready for logs
-                if self.is_pod_ready_for_logs(pod_name, self.args.namespace):
+                pod_json = self.get_pod_json(pod_name, self.args.namespace)
+                if pod_json:
+                    self.print_container_statuses(pod_name, pod_json)
+                    self.print_pod_container_logs(pod_name, self.args.namespace, pod_json)
+                elif self.is_pod_ready_for_logs(pod_name, self.args.namespace):
                     logs = self.get_pod_logs(pod_name, self.args.namespace)
                     if logs:
                         print(f"📋 Operator logs for {pod_name}:")
@@ -1022,6 +1025,23 @@ class MLflowDeployer:
             print(f"❌ Failed to get events for pod {pod_name}: {e}")
             return None
 
+    def get_pod_json(self, pod_name, namespace):
+        """Return pod JSON for richer status and per-container log retrieval."""
+        try:
+            pod = self.run_command(
+                ["kubectl", "get", "pod", pod_name, "-n", namespace, "-o", "json"],
+                check=False, capture_output=True
+            )
+            if not pod or pod.returncode != 0 or not pod.stdout:
+                return None
+            return json.loads(pod.stdout)
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"❌ Failed to parse pod JSON for {pod_name}: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ Failed to get pod JSON for {pod_name}: {e}")
+            return None
+
     def get_pod_logs(self, pod_name, namespace):
         """Get logs for a specific pod"""
         try:
@@ -1033,6 +1053,121 @@ class MLflowDeployer:
         except Exception as e:
             print(f"❌ Failed to get logs for pod {pod_name}: {e}")
             return None
+
+    def get_container_logs(self, pod_name, namespace, container_name, previous=False):
+        """Get logs for a specific container, including init containers."""
+        try:
+            cmd = [
+                "kubectl", "logs", pod_name,
+                "-n", namespace,
+                "-c", container_name,
+                "--tail=100",
+            ]
+            if previous:
+                cmd.append("--previous")
+
+            logs = self.run_command(cmd, check=False, capture_output=True)
+            if not logs or not logs.stdout:
+                return None
+
+            output = logs.stdout.strip()
+            if not output:
+                return None
+
+            ignored_messages = (
+                "previous terminated container",
+                "is waiting to start",
+                "PodInitializing",
+            )
+            if any(message in output for message in ignored_messages):
+                return None
+
+            return output
+        except Exception as e:
+            print(f"❌ Failed to get logs for container {container_name} in pod {pod_name}: {e}")
+            return None
+
+    def print_container_statuses(self, pod_name, pod_json):
+        """Print a concise summary of init and app container states."""
+        status = pod_json.get("status", {})
+        sections = [
+            ("init", status.get("initContainerStatuses", [])),
+            ("app", status.get("containerStatuses", [])),
+        ]
+
+        printed = False
+        for section_name, statuses in sections:
+            for container_status in statuses:
+                printed = True
+                fragments = [f"{section_name}/{container_status.get('name', '<unknown>')}"]
+
+                state = container_status.get("state", {})
+                if "waiting" in state:
+                    waiting = state["waiting"]
+                    fragments.append(f"state=Waiting")
+                    if waiting.get("reason"):
+                        fragments.append(f"reason={waiting['reason']}")
+                    if waiting.get("message"):
+                        fragments.append(f"message={waiting['message']}")
+                elif "running" in state:
+                    running = state["running"]
+                    fragments.append("state=Running")
+                    if running.get("startedAt"):
+                        fragments.append(f"startedAt={running['startedAt']}")
+                elif "terminated" in state:
+                    terminated = state["terminated"]
+                    fragments.append("state=Terminated")
+                    if terminated.get("reason"):
+                        fragments.append(f"reason={terminated['reason']}")
+                    if terminated.get("exitCode") is not None:
+                        fragments.append(f"exitCode={terminated['exitCode']}")
+
+                last_state = container_status.get("lastState", {})
+                if "terminated" in last_state:
+                    terminated = last_state["terminated"]
+                    fragments.append("lastState=Terminated")
+                    if terminated.get("reason"):
+                        fragments.append(f"lastReason={terminated['reason']}")
+                    if terminated.get("exitCode") is not None:
+                        fragments.append(f"lastExitCode={terminated['exitCode']}")
+
+                fragments.append(f"restarts={container_status.get('restartCount', 0)}")
+                print(f"📋 Container status for {pod_name}: {' '.join(fragments)}")
+
+        if not printed:
+            print(f"⚠️  No container status information available for {pod_name}")
+
+    def print_pod_container_logs(self, pod_name, namespace, pod_json):
+        """Print current and previous logs for each pod container."""
+        spec = pod_json.get("spec", {})
+        container_groups = [
+            ("init", spec.get("initContainers", [])),
+            ("container", spec.get("containers", [])),
+        ]
+
+        found_logs = False
+        for group_name, containers in container_groups:
+            for container in containers:
+                container_name = container.get("name")
+                if not container_name:
+                    continue
+
+                logs = self.get_container_logs(pod_name, namespace, container_name)
+                if logs:
+                    found_logs = True
+                    print(f"📋 {group_name.capitalize()} logs for {pod_name}/{container_name}:")
+                    print(logs)
+
+                previous_logs = self.get_container_logs(
+                    pod_name, namespace, container_name, previous=True
+                )
+                if previous_logs:
+                    found_logs = True
+                    print(f"📋 Previous {group_name} logs for {pod_name}/{container_name}:")
+                    print(previous_logs)
+
+        if not found_logs:
+            print(f"⚠️  No container logs available for {pod_name}")
 
     def is_pod_ready_for_logs(self, pod_name, namespace):
         """Check if pod is in a state where logs can be retrieved"""
@@ -1135,8 +1270,11 @@ class MLflowDeployer:
             except Exception as e:
                 print(f"❌ Failed to check pod status for {pod_name}: {e}")
 
-            # Get logs if pod is ready for logs
-            if self.is_pod_ready_for_logs(pod_name, namespace):
+            pod_json = self.get_pod_json(pod_name, namespace)
+            if pod_json:
+                self.print_container_statuses(pod_name, pod_json)
+                self.print_pod_container_logs(pod_name, namespace, pod_json)
+            elif self.is_pod_ready_for_logs(pod_name, namespace):
                 logs = self.get_pod_logs(pod_name, namespace)
                 if logs:
                     print(f"📋 Logs for {pod_name}:")
