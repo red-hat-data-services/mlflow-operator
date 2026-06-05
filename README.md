@@ -352,6 +352,14 @@ See the [config/samples](./config/samples/) directory for complete examples:
   # For CR with custom name (e.g., "production"):
   kubectl logs -n <namespace> deployment/mlflow-production -c mlflow
   ```
+- If the pod is stuck in `Init:CrashLoopBackOff`, inspect the init container and the
+  previous restart directly:
+  ```bash
+  kubectl get pods -n <namespace>
+  kubectl describe pod/<mlflow-pod-name> -n <namespace>
+  kubectl logs -n <namespace> pod/<mlflow-pod-name> -c db-migration
+  kubectl logs -n <namespace> pod/<mlflow-pod-name> -c db-migration --previous
+  ```
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**

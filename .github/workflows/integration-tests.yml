@@ -354,40 +354,9 @@ jobs:
       - name: Collect debug logs
         id: collect-logs
         if: ${{ steps.run-tests.outcome != 'success' && !cancelled() }}
-        run: |
-          echo "🔍 Collecting debug information..."
-
-          # Create debug directory
-          mkdir -p debug-logs
-
-          # Collect Kubernetes logs
-          kubectl get pods -n "${{ steps.deploy-mlflow.outputs.namespace }}" -o wide > debug-logs/pods.txt
-          kubectl get svc -n "${{ steps.deploy-mlflow.outputs.namespace }}" -o wide > debug-logs/services.txt
-          kubectl get events -n "${{ steps.deploy-mlflow.outputs.namespace }}" --sort-by='.lastTimestamp' > debug-logs/events.txt
-
-          # Collect MLflow logs
-          for pod in $(kubectl get pods -n "${{ steps.deploy-mlflow.outputs.namespace }}" -l app=mlflow -o jsonpath='{.items[*].metadata.name}'); do
-            echo "📋 Collecting logs for pod: $pod"
-            kubectl logs "$pod" -n "${{ steps.deploy-mlflow.outputs.namespace }}" > "debug-logs/${pod}.log" 2>&1 || echo "Failed to get logs for $pod"
-          done
-
-          # Collect operator logs
-          for pod in $(kubectl get pods -n "${{ steps.deploy-mlflow.outputs.namespace }}" -l control-plane=controller-manager -o jsonpath='{.items[*].metadata.name}'); do
-            echo "📋 Collecting logs for operator pod: $pod"
-            kubectl logs "$pod" -n "${{ steps.deploy-mlflow.outputs.namespace }}" > "debug-logs/${pod}-operator.log" 2>&1 || echo "Failed to get logs for $pod"
-          done
-
-          # Collect SeaweedFS logs
-          for pod in $(kubectl get pods -n "${{ steps.deploy-mlflow.outputs.namespace }}" -l app=seaweedfs -o jsonpath='{.items[*].metadata.name}'); do
-            echo "📋 Collecting logs for SeaweedFS pod: $pod"
-            kubectl logs "$pod" -n "${{ steps.deploy-mlflow.outputs.namespace }}" > "debug-logs/${pod}-seaweedfs.log" 2>&1 || echo "Failed to get logs for $pod"
-          done
-
-          # Collect PostgreSQL logs
-          for pod in $(kubectl get pods -n "${{ steps.deploy-mlflow.outputs.namespace }}" -l app=postgres -o jsonpath='{.items[*].metadata.name}'); do
-            echo "📋 Collecting logs for PostgreSQL pod: $pod"
-            kubectl logs "$pod" -n "${{ steps.deploy-mlflow.outputs.namespace }}" > "debug-logs/${pod}-postgres.log" 2>&1 || echo "Failed to get logs for $pod"
-          done
+        uses: ./.github/actions/collect-debug-logs
+        with:
+          debug_namespace: ${{ steps.deploy-mlflow.outputs.namespace }}
 
       - name: Upload debug logs
         uses: actions/upload-artifact@v4
