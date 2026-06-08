@@ -1,26 +1,23 @@
-name: MLflow Runtime Integration Tests
-
-# This workflow owns push, pull request, and manual MLflow runtime validation.
+name: MLflow Upgrade Validation
 
 env:
-  NAMESPACE: 'opendatahub'
-  INTEGRATION_CLUSTER_NAME: 'mlflow'
-  PYTEST_ARGS: '-v --tb=short --strict-markers --disable-warnings'
-  AWS_ACCESS_KEY_ID: 'minio'
-  AWS_SECRET_ACCESS_KEY: 'minio123'
-  AWS_S3_BUCKET: 'mlpipeline'
-  MLFLOW_RUNTIME_ARTIFACT: 'mlflow-runtime-image'
-  MLFLOW_RUNTIME_IMAGE: 'localhost/mlflow-runtime:ci'
-  MLFLOW_TESTS_RUNTIME_ARTIFACT: 'mlflow-tests-image'
-  MLFLOW_TESTS_RUNTIME_IMAGE: 'localhost/mlflow-tests:ci'
-  OPERATOR_RUNTIME_ARTIFACT: 'mlflow-operator-image'
-  OPERATOR_RUNTIME_IMAGE: 'localhost/mlflow-operator:ci'
+  NAMESPACE: "opendatahub"
+  AWS_ACCESS_KEY_ID: "minio"
+  AWS_SECRET_ACCESS_KEY: "minio123"
+  AWS_S3_BUCKET: "mlpipeline"
+  MLFLOW_RUNTIME_ARTIFACT: "mlflow-runtime-image"
+  MLFLOW_RUNTIME_IMAGE: "localhost/mlflow-runtime:ci"
+  MLFLOW_TESTS_RUNTIME_ARTIFACT: "mlflow-tests-image"
+  MLFLOW_TESTS_RUNTIME_IMAGE: "localhost/mlflow-tests:ci"
+  OPERATOR_RUNTIME_ARTIFACT: "mlflow-operator-image"
+  OPERATOR_RUNTIME_IMAGE: "localhost/mlflow-operator:ci"
+  UPGRADE_VALIDATION_CLUSTER_NAME: "mlflow-upgrade-validation"
+  UPGRADE_TEST_WORKSPACE: "mlflow-upgrade-test-workspace"
 
 on:
   push:
     branches:
-      - main
-
+      - rhoai-3.4
   pull_request:
 
 jobs:
@@ -46,20 +43,8 @@ jobs:
             SOURCE_REPOSITORY="opendatahub-io/mlflow"
           fi
 
-          # Build the MLflow branch that corresponds to the operator branch under test.
-          # Examples:
-          # - ODH PR to operator main -> opendatahub-io/mlflow master
-          # - ODH PR to operator release-3.4 -> opendatahub-io/mlflow release-3.4
-          # - RHDS PR to operator main -> red-hat-data-services/mlflow main
-          # - RHDS PR to operator rhoai-3.4 -> red-hat-data-services/mlflow rhoai-3.4
-          if [[ "$REPOSITORY_OWNER" == "opendatahub-io" && "$TARGET_REF" == "main" ]]; then
-            SOURCE_REF="master"
-          else
-            SOURCE_REF="$TARGET_REF"
-          fi
-
           echo "source_repository=$SOURCE_REPOSITORY" >> "$GITHUB_OUTPUT"
-          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
 
       - name: Checkout MLflow source
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -144,6 +129,21 @@ jobs:
         run: |
           mkdir -p test-image
           docker build -f mlflow-tests/images/Dockerfile.konflux -t "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" .
+
+      - name: Verify test image baked supported MLflow version
+        shell: bash
+        run: |
+          expected_version="$(python3 scripts/print_supported_mlflow_version.py --component-metadata config/component_metadata.yaml --normalized)"
+          actual_version="$(docker run --rm --entrypoint bash "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" -c 'printf "%s\n" "${MLFLOW_TEST_SUPPORTED_VERSION:?}"')"
+          if [ "$actual_version" != "$expected_version" ]; then
+            printf '::error::Expected test image to expose MLFLOW_TEST_SUPPORTED_VERSION=%s, but saw %s\n' "$expected_version" "$actual_version"
+            exit 1
+          fi
+          printf 'Verified test image baked supported MLflow version: %s\n' "$actual_version"
+
+      - name: Save MLflow tests image archive
+        shell: bash
+        run: |
           docker save -o "test-image/${{ env.MLFLOW_TESTS_RUNTIME_ARTIFACT }}.tar" "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}"
 
       - name: Upload MLflow tests image artifact
@@ -153,61 +153,35 @@ jobs:
           path: test-image/${{ env.MLFLOW_TESTS_RUNTIME_ARTIFACT }}.tar
           retention-days: 1
 
-  integration-tests:
-    needs: [build-mlflow-runtime-image, build-mlflow-operator-image, build-mlflow-tests-image]
+  current-upgrade-pytest-validation:
+    needs:
+      - build-mlflow-runtime-image
+      - build-mlflow-operator-image
+      - build-mlflow-tests-image
+    name: Validate current upgrade pytest flow (${{ matrix.backend_store }}, ${{ matrix.artifact_storage }})
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
     strategy:
-      matrix:
-        k8s_version: ["v1.34.0"]
-        serve_artifacts: ["true", "false"]
-        artifact_storage: ["file", "s3"]
-        backend_store: ["sqlite", "postgres"]
-        registry_store: ["sqlite", "postgres"]
-        include:
-          - k8s_version: "v1.29.0"
-            backend_store: "sqlite"
-            artifact_storage: "file"
-            serve_artifacts: "true"
-            registry_store: "sqlite"
-            workspace_label_selector: '{"matchLabels":{"mlflow-enabled":"true"}}'
-          - k8s_version: "v1.29.0"
-            backend_store: "postgres"
-            artifact_storage: "s3"
-            serve_artifacts: "false"
-            registry_store: "postgres"
-          # TLS variant — validates MLflow connects to postgres + s3 over TLS.
-          # Only serve_artifacts=true so the test runner doesn't need direct
-          # TLS access to the backends (MLflow proxies everything).
-          - k8s_version: "v1.34.0"
-            backend_store: "postgres"
-            artifact_storage: "s3"
-            serve_artifacts: "true"
-            registry_store: "postgres"
-            postgres_tls: "true"
-            seaweedfs_tls: "true"
       fail-fast: false
-    name: MLflow Integration tests - K8sVersion=${{ matrix.k8s_version }} serve_artifacts=${{ matrix.serve_artifacts }} artifact_storage=${{ matrix.artifact_storage }} backend_store=${{ matrix.backend_store }} registry_store=${{ matrix.registry_store }} postgres_tls=${{ matrix.postgres_tls || 'false' }} seaweedfs_tls=${{ matrix.seaweedfs_tls || 'false' }}
-
+      matrix:
+        backend_store:
+          - sqlite
+          - postgres
+        artifact_storage:
+          - file
+          - s3
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
 
-      - name: Free up disk space
-        uses: kubeflow/pipelines/.github/actions/github-disk-cleanup@3004f974b571840bdb1ed6362c520d3cf566e9c0 # master
-
-      - name: Create k8s Kind Cluster
-        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
-        id: cluster-create
+      - name: Create Kind cluster
+        uses: ./.github/actions/create-cluster
         with:
-          version: v0.29.0
-          node_image: kindest/node:${{ matrix.k8s_version }}
-          cluster_name: ${{ env.INTEGRATION_CLUSTER_NAME }}
-          registry: 'true'
+          cluster_name: ${{ env.UPGRADE_VALIDATION_CLUSTER_NAME }}
+          k8s_version: "v1.34.0"
 
       - name: Download MLflow operator image artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -219,7 +193,7 @@ jobs:
         shell: bash
         run: |
           docker load -i "operator-image/${{ env.OPERATOR_RUNTIME_ARTIFACT }}.tar"
-          kind load docker-image "${{ env.OPERATOR_RUNTIME_IMAGE }}" --name "${{ env.INTEGRATION_CLUSTER_NAME }}"
+          kind load docker-image "${{ env.OPERATOR_RUNTIME_IMAGE }}" --name "${{ env.UPGRADE_VALIDATION_CLUSTER_NAME }}"
 
       - name: Download MLflow runtime image artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -231,7 +205,7 @@ jobs:
         shell: bash
         run: |
           docker load -i "runtime-image/${{ env.MLFLOW_RUNTIME_ARTIFACT }}.tar"
-          kind load docker-image "${{ env.MLFLOW_RUNTIME_IMAGE }}" --name "${{ env.INTEGRATION_CLUSTER_NAME }}"
+          kind load docker-image "${{ env.MLFLOW_RUNTIME_IMAGE }}" --name "${{ env.UPGRADE_VALIDATION_CLUSTER_NAME }}"
 
       - name: Download MLflow tests image artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -243,89 +217,70 @@ jobs:
         shell: bash
         run: docker load -i "test-image/${{ env.MLFLOW_TESTS_RUNTIME_ARTIFACT }}.tar"
 
-      - name: Run integration tests
-        id: run-tests
-        continue-on-error: true
+      - name: Run current-version pre-upgrade validation phase
+        shell: bash
         env:
           ARTIFACT_BACKENDS: ${{ matrix.artifact_storage }}
           BACKEND_STORE: ${{ matrix.backend_store }}
-          REGISTRY_STORE: ${{ matrix.registry_store }}
-          SERVE_ARTIFACTS: ${{ matrix.serve_artifacts }}
-          POSTGRES_TLS: ${{ matrix.postgres_tls || 'false' }}
-          SEAWEEDFS_TLS: ${{ matrix.seaweedfs_tls || 'false' }}
-          WORKSPACE_LABEL_SELECTOR: ${{ matrix.workspace_label_selector || '' }}
+          REGISTRY_STORE: ${{ matrix.backend_store }}
         run: |
           mkdir -p test-results
-          set +e
           docker run --rm --network host \
             -v "$HOME/.kube:/mlflow/.kube:ro,z" \
             -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
+            -e IN_CLUSTER_MODE=false \
             -e DEPLOY_MLFLOW_OPERATOR=false \
+            -e SKIP_CLEANUP=true \
             -e NAMESPACE="${{ env.NAMESPACE }}" \
             -e MLFLOW_OPERATOR_IMAGE="${{ env.OPERATOR_RUNTIME_IMAGE }}" \
             -e MLFLOW_IMAGE="${{ env.MLFLOW_RUNTIME_IMAGE }}" \
             -e BACKEND_STORE="${BACKEND_STORE}" \
             -e REGISTRY_STORE="${REGISTRY_STORE}" \
             -e ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS}" \
-            -e SERVE_ARTIFACTS="${SERVE_ARTIFACTS}" \
+            -e SERVE_ARTIFACTS=true \
             -e AWS_ACCESS_KEY_ID="${{ env.AWS_ACCESS_KEY_ID }}" \
             -e AWS_SECRET_ACCESS_KEY="${{ env.AWS_SECRET_ACCESS_KEY }}" \
             -e AWS_S3_BUCKET="${{ env.AWS_S3_BUCKET }}" \
             -e BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e WORKSPACE_LABEL_SELECTOR="${WORKSPACE_LABEL_SELECTOR}" \
-            -e POSTGRES_TLS="${POSTGRES_TLS}" \
-            -e SEAWEEDFS_TLS="${SEAWEEDFS_TLS}" \
-            -e TEST_RESULTS_DIR="/mlflow/results" \
+            -e upgrade_test_workspace="${{ env.UPGRADE_TEST_WORKSPACE }}" \
+            -e TEST_RESULTS_DIR="/mlflow/results/pre" \
             "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" \
-            ${{ env.PYTEST_ARGS }}
+            -m pre_upgrade
 
-          TEST_EXIT_CODE=$?
-          set -e
-          echo "test_exit_code=$TEST_EXIT_CODE" >> "$GITHUB_OUTPUT"
-
-          if [ $TEST_EXIT_CODE -eq 0 ]; then
-            echo "✅ All integration tests passed!"
-          else
-            echo "❌ Some integration tests failed (exit code: $TEST_EXIT_CODE)"
-          fi
-
-          exit $TEST_EXIT_CODE
-
-      - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        id: upload-report
-        if: (!cancelled())
-        with:
-          name: integration-test-results-${{ matrix.k8s_version }}-${{ matrix.backend_store }}-${{ matrix.registry_store }}-${{ matrix.artifact_storage }}-${{ matrix.serve_artifacts }}-postgres_tls_${{ matrix.postgres_tls || 'false' }}-seaweedfs_tls_${{ matrix.seaweedfs_tls || 'false' }}
-          path: test-results/
-          retention-days: 30
-
-      - name: Generate test summary
-        uses: kubeflow/pipelines/.github/actions/junit-summary@3004f974b571840bdb1ed6362c520d3cf566e9c0 # master
-        if: (!cancelled())
-        with:
-          xml_files: test-results/*.xml
-        continue-on-error: true
-
-      - name: Collect integration debug logs
-        id: collect-logs
-        if: ${{ failure() && !cancelled() }}
-        continue-on-error: true
-        uses: ./.github/actions/collect-debug-logs
-        with:
-          debug_namespace: ${{ env.NAMESPACE }}
-
-      - name: Upload integration debug logs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ failure() && !cancelled() }}
-        with:
-          name: debug-logs-${{ matrix.k8s_version }}-${{ matrix.backend_store }}-${{ matrix.registry_store }}-${{ matrix.artifact_storage }}-${{ matrix.serve_artifacts }}-postgres_tls_${{ matrix.postgres_tls || 'false' }}-seaweedfs_tls_${{ matrix.seaweedfs_tls || 'false' }}
-          path: debug-logs/
-          retention-days: 7
-
-      - name: Mark workflow failure if test step failed
-        if: steps.run-tests.outcome != 'success' && !cancelled()
+      - name: Run current-version post-upgrade validation phase
         shell: bash
-        run: exit 1
+        env:
+          ARTIFACT_BACKENDS: ${{ matrix.artifact_storage }}
+          BACKEND_STORE: ${{ matrix.backend_store }}
+          REGISTRY_STORE: ${{ matrix.backend_store }}
+        run: |
+          docker run --rm --network host \
+            -v "$HOME/.kube:/mlflow/.kube:ro,z" \
+            -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
+            -e IN_CLUSTER_MODE=false \
+            -e DEPLOY_MLFLOW_OPERATOR=false \
+            -e SKIP_DEPLOYMENT=true \
+            -e SKIP_CLEANUP=true \
+            -e NAMESPACE="${{ env.NAMESPACE }}" \
+            -e MLFLOW_OPERATOR_IMAGE="${{ env.OPERATOR_RUNTIME_IMAGE }}" \
+            -e MLFLOW_IMAGE="${{ env.MLFLOW_RUNTIME_IMAGE }}" \
+            -e BACKEND_STORE="${BACKEND_STORE}" \
+            -e REGISTRY_STORE="${REGISTRY_STORE}" \
+            -e ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS}" \
+            -e SERVE_ARTIFACTS=true \
+            -e AWS_ACCESS_KEY_ID="${{ env.AWS_ACCESS_KEY_ID }}" \
+            -e AWS_SECRET_ACCESS_KEY="${{ env.AWS_SECRET_ACCESS_KEY }}" \
+            -e AWS_S3_BUCKET="${{ env.AWS_S3_BUCKET }}" \
+            -e BUCKET="${{ env.AWS_S3_BUCKET }}" \
+            -e upgrade_test_workspace="${{ env.UPGRADE_TEST_WORKSPACE }}" \
+            -e TEST_RESULTS_DIR="/mlflow/results/post" \
+            "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" \
+            -m post_upgrade
 
-
+      - name: Upload current upgrade pytest reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: current-upgrade-pytest-validation-results-${{ matrix.backend_store }}-${{ matrix.artifact_storage }}
+          path: test-results/
+          retention-days: 7

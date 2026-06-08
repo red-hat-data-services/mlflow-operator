@@ -68,7 +68,10 @@ make generate
 
 **Note**: Always regenerate manifests and code after modifying API types. CI will verify that generated code is up-to-date.
 
-When bumping the supported MLflow version, update `config/component_metadata.yaml`, then rerun the version-alignment verification. The Makefile injects `SupportedMLflowVersion` from that metadata via Go `-ldflags`; the test harness and test image read the same value through `scripts/print_supported_mlflow_version.py`. Top-level `scripts/` is preferred for developer-maintenance helpers like this; `test/scripts/` is reserved for test validation helpers.
+When bumping the supported MLflow version, update
+`config/component_metadata.yaml` and any branch-specific workflow or harness
+assumptions that depend on that version. Top-level `scripts/` is preferred for
+developer-maintenance helpers like this.
 
 ## Deployment Modes
 
@@ -202,23 +205,6 @@ spec:
         name: aws-credentials
 ```
 
-### Operator-managed database migration
-
-- `spec.migration.mode` controls operator-managed migration behavior:
-  - `Automatic` (default) runs the migration Job on bootstrap and whenever `status.version` differs from the operator-supported MLflow version
-  - `Always` reruns the migration flow for each new desired generation, meaning each new revision of the MLflow resource after its desired state changes, before the MLflow Deployment is scaled back up
-- `spec.migration.ttlSecondsAfterFinished` optionally overrides how long finished operator-managed migration Jobs are retained before Kubernetes TTL cleanup may remove them; when omitted, the operator defaults to 86400 seconds (24 hours), and values below 3600 seconds (1 hour) are rejected
-- Finished migration Jobs can therefore remain visible for up to 24 hours in shared namespaces such as `redhat-ods-applications`, which is intentional so admins have time to inspect logs after upgrades
-- `status.version` records the last supported MLflow version that successfully completed the operator-managed migration/deploy flow
-- The `Migration` status condition records the per-generation migration state via `observedGeneration`: `Unknown` while migration is in progress or retrying after a transient failure, `True` after success, and `False` after a terminal failure
-- Operator-managed migration only supports documented SQL metadata store URIs (`sqlite://`, `postgresql://`) for backend and registry stores; inline `file://` metadata URIs are intentionally rejected and are not supported for operator-managed migration
-- If `spec.image.image` overrides the default image, the operator still uses that image for the migration Job to support hotfix and test images, but it does not prevalidate the custom image's migration runtime contract before scale-down; an incompatible custom image can therefore fail after the MLflow Deployment has been scaled down and cause downtime
-- The operator-managed migration Job verifies that the resolved MLflow image reports `SupportedMLflowVersion` before it advances `status.version`
-- Kubernetes Job retries remain finite, but the operator recreates fresh migration Jobs after a short delay for retryable failures such as transient connectivity problems; terminal failures such as version mismatches, unsupported metadata store URIs, or known Alembic revision-resolution errors stop automatic retries
-- For ODH/RHOAI MLflow images that ship `mlflow.store.db.migration_gap`, the operator-managed migration Job runs the backend-only RHOAI `3.3 -> 3.4` gap repair before the generic MLflow migration logic; this replaced the earlier Deployment init-container approach
-- The presence-based `mlflow.opendatahub.io/force-migrate` annotation forces a one-shot migration; the operator clears it after a successful forced run, and if a finished Job already exists for the current desired generation, the operator deletes it first so it can create the replacement Job with the same generated name. Terminal migration failures instruct admins to use that annotation after fixing the issue.
-- When backend and registry store URIs differ, the migration Job must handle them independently and only advance `status.version` after both succeed
-
 ## Testing
 
 ### Unit Tests
@@ -239,7 +225,6 @@ make test-e2e-full
 
 `make test-e2e` expects an already-running Kubernetes cluster and does not create one.
 `make test-e2e-full` creates a Kind cluster (`KIND_CLUSTER`, default `mlflow`), builds/loads the image, and runs e2e tests.
-`make test-e2e-upgrade` runs the upgrade-focused e2e suite against an existing cluster and expects `MLFLOW_SEED_IMAGE` to point at a known-good MLflow `3.10.1` seed image. The default is pinned to the ODH release 1.1 digest (`v3.10.1+rhaiv.3`) so the upgrade path does not depend on rebuilding an intermediate seed image during test setup. The GitHub workflow deploys a `3.10.1`-compatible operator image plus a running MLflow `3.10.1` instance, and the upgrade Ginkgo test then scales the operator down, clears the MLflow image override, switches the operator Deployment to the current image, and scales the operator back up before verifying the operator-managed migration flow.
 Cluster cleanup is a separate step:
 
 ```bash
@@ -251,9 +236,6 @@ Quick workflow:
 ```bash
 # Full e2e run against Kind
 make test-e2e-full
-
-# Upgrade-focused e2e run against an existing cluster
-make test-e2e-upgrade MLFLOW_SEED_IMAGE=quay.io/opendatahub/mlflow@sha256:ad51bbd7f770491da88dc1db3b3c84f7471d25c48026ecb385180b63b18f4c64
 
 # Cleanup when done
 make cleanup-kind-cluster
@@ -429,10 +411,8 @@ Validates sample CRs on every PR:
 - `test.yml` - Runs unit tests
 - `lint.yml` - Runs golangci-lint
 - `build-and-push-test-image.yml` - Publishes the public `quay.io/opendatahub/mlflow-tests` image for `main`, `release-*`, and `rhoai-*` branches as a multi-arch manifest covering `amd64` and `arm64`; keep `mlflow-tests/images/Dockerfile.konflux` downloads architecture-aware (`TARGETARCH`) whenever adding new CLI tooling
-- `integration-tests.yml` - Normal MLflow runtime workflow for push and pull request validation. It builds one operator image artifact from this repository, one MLflow runtime image artifact from the matching owner MLflow repository, and one `mlflow-tests` image artifact from this repository, then reuses those artifacts in the current-version integration matrix by executing the test image as the harness entrypoint. The one intentional exception is ODH default-branch parity: operator `main` maps to `opendatahub-io/mlflow@master`. The operator image build uses `Dockerfile.konflux` when that file exists in the checked-out branch and falls back to `Dockerfile` otherwise. Built-image version alignment remains RHDS-only, and ODH push/PR activity targeting `main` still verifies the default image version from the checked-out repo without depending on the runtime-image build job.
-- `upgrade-validation.yml` - Upgrade-focused MLflow workflow for push and pull request validation. It builds and reuses the same operator, runtime, and test image artifacts for two complementary marker-validation jobs plus the upgrade-path e2e job. `current-upgrade-pytest-validation` runs `mlflow-tests` `pre_upgrade` / `post_upgrade` directly on the PR-built images so the upgrade-tagged pytest machinery itself and additive datasets such as `3.11` stay exercised. `seeded-upgrade-state-validation` seeds a `3.10.1`-compatible source deployment, patches the running operator Deployment and seeded MLflow CR in place to the PR-built images, and then runs the `mlflow-tests` `post_upgrade` suite against that upgraded state across both file and S3 artifact backends. The `build-mlflow-tests-image` job also verifies that the direct-execution test image exposes the repo's normalized supported MLflow version through `MLFLOW_TEST_SUPPORTED_VERSION`, matching the Jenkins-style container entry path. Upgrade tests use a pinned ODH release 1.1 seed image digest (`v3.10.1+rhaiv.3`) instead of rebuilding `test/e2e/images/mlflow-3.10.0.Dockerfile`, which was removed after its `microdnf`-based Python reinstall started pulling an incompatible sqlite runtime; the workflow retags that digest to a local seed tag before `kind load` and deployment so containerd does not have to resolve the digest-only reference during container creation. Failed jobs upload debug artifacts with namespace snapshots plus operator, MLflow, and migration-job pod logs and descriptions when available.
-- `operator-chaos.yml` - Offline operator-chaos upgrade-risk gate. It validates `chaos/knowledge/mlflow.yaml`, runs `operator-chaos preflight --local`, diffs the base and PR knowledge models with `operator-chaos diff --breaking`, compares the checked-in MLflow CRD schema with `operator-chaos diff-crds`, previews generated upgrade experiments with `operator-chaos simulate-upgrade --dry-run`, and fails fast when validation, command execution, or breaking knowledge/CRD changes are reported. This workflow is intentionally asset-focused and does not create a cluster or execute live chaos experiments.
-- `verify-mlflow-version-alignment.yml` - Scheduled ODH-only default-image alignment check. It runs directly from the checked-out operator repo and verifies the `config/base/params.env` plus `config/overlays/kind/params.env` defaults against the supported MLflow version metadata without instantiating the heavier integration workflow.
+- `integration-tests.yml` - Builds the operator image from this repo for all runs, but only builds the MLflow image from the aligned branch of `red-hat-data-services/mlflow` using `Dockerfile.konflux` for `red-hat-data-services` `rhoai-*` branches; other branches continue using the existing Quay image selection. The test harness auto-detects connectivity and uses the MLflow CR `status.url` on OpenShift unless `FORCE_PORT_FORWARD=true`.
+- `upgrade-validation.yml` - On `rhoai-3.4`, runs only the current-version upgrade pytest flow: `pre_upgrade` seeds static MLflow `3.10` state on the PR-built images, then `post_upgrade` reuses that same deployment. This branch intentionally does not carry the newer seeded historical-source workflow path, and `mlflow-tests/images/test-run.sh` must skip `status.version` waits because `rhoai-3.4` does not publish that status field during the test flow.
 - `test-e2e.yml` - Runs end-to-end tests
 - `verify-kustomize.yml` - Validates kustomize overlays
 

@@ -7,14 +7,8 @@ import os
 import tempfile
 
 import mlflow
-from mlflow.entities.span import NO_OP_SPAN_TRACE_ID
 from mlflow.exceptions import MlflowException
-from mlflow.tracing.attachments import Attachment
-from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
-import requests
 
-from ..constants.config import Config
-from ..http_utils import get_mlflow_base_uri, get_requests_verify_value
 from ..shared import TestContext
 from .utils import (
     get_pre_upgrade_version_from_configmap,
@@ -40,12 +34,6 @@ def _require_upgrade_payload(test_context: TestContext, key: str) -> dict:
     if payload is None:
         raise ValueError(f"test_context.upgrade_state['{key}'] must be set before this action")
     return payload
-
-
-def _require_upgrade_value(test_context: TestContext, key: str):
-    if key not in test_context.upgrade_state:
-        raise ValueError(f"test_context.upgrade_state['{key}'] must be set before this action")
-    return test_context.upgrade_state[key]
 
 
 def _is_missing_resource_error(exc: MlflowException) -> bool:
@@ -141,99 +129,6 @@ def action_log_upgrade_text_artifact(test_context: TestContext) -> None:
         mlflow.log_artifact(target_path)
 
 
-def action_create_upgrade_trace(test_context: TestContext) -> None:
-    """Create the current upgrade trace with session metadata."""
-    session_payload = _require_upgrade_payload(test_context, "current_trace_session")
-    trace_payload = _require_upgrade_payload(test_context, "current_trace")
-    if not test_context.active_experiment_id:
-        raise ValueError("active_experiment_id must be set before creating an upgrade trace")
-
-    with mlflow.tracing.context(
-        session_id=session_payload["session_id"],
-        user=session_payload["user"],
-    ):
-        inputs = dict(trace_payload["inputs"])
-        if "attachment_content" in trace_payload:
-            attachment_name = trace_payload["inputs"]["attachment_name"]
-            inputs["attachment"] = Attachment(
-                content_type="text/plain",
-                content_bytes=trace_payload["attachment_content"].encode("utf-8"),
-            )
-            test_context.upgrade_observed_state.setdefault("trace_attachment_names", {})[
-                trace_payload["trace_name"]
-            ] = attachment_name
-        span = test_context.user_client.start_trace(
-            name=trace_payload["trace_name"],
-            experiment_id=test_context.active_experiment_id,
-        )
-        span.set_inputs(inputs)
-        span.set_outputs(trace_payload["outputs"])
-        span.end()
-
-    trace_id = getattr(span, "request_id", None) or getattr(span, "trace_id", None)
-    if trace_id is None:
-        raise AssertionError(
-            f"Trace '{trace_payload['trace_name']}' did not return a trace/request id"
-        )
-    if trace_id == NO_OP_SPAN_TRACE_ID:
-        raise AssertionError(
-            f"Trace '{trace_payload['trace_name']}' returned a no-op span trace id"
-        )
-    test_context.current_trace_id = trace_id
-    test_context.current_trace_name = trace_payload["trace_name"]
-    test_context.upgrade_observed_state.setdefault("trace_ids", {})[trace_payload["trace_name"]] = (
-        trace_id
-    )
-
-
-def action_collect_upgrade_trace_observations(test_context: TestContext) -> None:
-    """Collect persisted trace data for the active upgrade case."""
-    case = _require_upgrade_payload(test_context, "case")
-    experiment = mlflow.get_experiment_by_name(case["experiment_name"])
-    if experiment is None:
-        raise ValueError(f"Experiment '{case['experiment_name']}' not found")
-
-    traces = test_context.user_client.search_traces(
-        experiment_ids=[experiment.experiment_id],
-        max_results=100,
-        flush=True,
-    )
-
-    observed_by_session = {}
-    attachment_contents = {}
-    for trace in traces:
-        metadata = trace.info.trace_metadata or {}
-        session_id = metadata.get("mlflow.trace.session")
-        if not session_id or not trace.data.spans:
-            continue
-        root_span = trace.data.spans[0]
-        observed_by_session.setdefault(session_id, {})[root_span.name] = trace
-
-        attachment_ref = root_span.inputs.get("attachment")
-        parsed_ref = Attachment.parse_ref(attachment_ref) if attachment_ref else None
-        if parsed_ref is None:
-            continue
-
-        response = requests.get(
-            f"{get_mlflow_base_uri()}/ajax-api/3.0/mlflow/get-trace-artifact",
-            params={
-                "request_id": trace.info.trace_id,
-                "path": parsed_ref["attachment_id"],
-            },
-            headers={
-                "Authorization": f"Bearer {Config.K8_API_TOKEN}",
-                WORKSPACE_HEADER_NAME: test_context.active_workspace,
-            },
-            verify=get_requests_verify_value(),
-            timeout=Config.REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        attachment_contents[root_span.name] = response.content.decode("utf-8")
-
-    test_context.upgrade_observed_state["traces_by_session"] = observed_by_session
-    test_context.upgrade_observed_state["trace_attachment_contents"] = attachment_contents
-
-
 def action_ensure_upgrade_registered_model(test_context: TestContext) -> None:
     """Create the current upgrade registered model if needed."""
     model_payload = _require_upgrade_payload(test_context, "current_registered_model")
@@ -273,37 +168,3 @@ def action_create_upgrade_model_version(test_context: TestContext) -> None:
     ).append(model_version.version)
 
 
-def action_ensure_upgrade_prompt(test_context: TestContext) -> None:
-    """Create the current upgrade prompt if needed."""
-    prompt_payload = _require_upgrade_payload(test_context, "current_prompt")
-    prompt_name = prompt_payload["name"]
-    try:
-        test_context.user_client.create_prompt(
-            name=prompt_name,
-            description=prompt_payload["description"],
-        )
-        logger.info("Created upgrade prompt '%s'", prompt_name)
-    except MlflowException as exc:
-        error_code = getattr(exc, "error_code", "")
-        if error_code == "RESOURCE_ALREADY_EXISTS" or "RESOURCE_ALREADY_EXISTS" in str(exc):
-            raise AssertionError(
-                f"Upgrade prompt '{prompt_name}' already exists in workspace "
-                f"'{test_context.active_workspace}'. Clean the static upgrade workspace before reseeding."
-            ) from exc
-        raise
-    test_context.upgrade_state["active_prompt_name"] = prompt_name
-
-
-def action_create_upgrade_prompt_version(test_context: TestContext) -> None:
-    """Create the current upgrade prompt version under the active prompt."""
-    prompt_version = _require_upgrade_payload(test_context, "current_prompt_version")
-    prompt_name = _require_upgrade_value(test_context, "active_prompt_name")
-    created = test_context.user_client.create_prompt_version(
-        name=prompt_name,
-        template=prompt_version["template"],
-        description=prompt_version["description"],
-    )
-    test_context.upgrade_observed_state.setdefault("prompt_versions", {}).setdefault(
-        prompt_name,
-        [],
-    ).append(created.version)

@@ -653,7 +653,11 @@ run_suite() {
         local addr_retry=0
         local addr_max=60  # 60 × 5 s = 5 min
         while [ -z "$external_url" ]; do
-            external_url=$(kubectl get mlflow "$MLFLOW_NAME" -o jsonpath='{.status.url}' 2>/dev/null || true)
+            external_url=$(
+                kubectl get mlflow "$MLFLOW_NAME" \
+                    --namespace "$NAMESPACE" \
+                    -o jsonpath='{.status.url}' 2>/dev/null || true
+            )
             [ -n "$external_url" ] && break
             addr_retry=$((addr_retry + 1))
             if [ "$addr_retry" -ge "$addr_max" ]; then
@@ -663,17 +667,10 @@ run_suite() {
             echo "  Attempt $addr_retry/$addr_max — retrying in 5s..."
             sleep 5
         done
-        local tracking_url="$external_url"
-        if ! should_use_mlflow_static_prefix; then
-            tracking_url="${external_url%/mlflow}"
-            echo "  Using legacy tracking URI shape without /mlflow static prefix for upgrade MLflow ${MLFLOW_TEST_SUPPORTED_VERSION:-unknown}"
-        fi
-        export MLFLOW_TRACKING_URI="$tracking_url"
+        export MLFLOW_TRACKING_URI="$external_url"
         health_url="${external_url}/health"
     else
-        local mlflow_base_path="/mlflow"
         if ! should_use_mlflow_static_prefix; then
-            mlflow_base_path=""
             echo "  Using legacy tracking URI shape without /mlflow static prefix for upgrade MLflow ${MLFLOW_TEST_SUPPORTED_VERSION:-unknown}"
         fi
         local health_base_path="/mlflow"
@@ -687,7 +684,7 @@ run_suite() {
         kubectl port-forward "svc/${MLFLOW_NAME}" -n "$NAMESPACE" 8443:8443 &
         PF_PID=$!
         sleep 2
-        export MLFLOW_TRACKING_URI="https://localhost:8443${mlflow_base_path}"
+        export MLFLOW_TRACKING_URI="https://localhost:8443"
         health_url="https://localhost:8443${health_base_path}/health"
     fi
     echo "  MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI"
@@ -708,16 +705,7 @@ run_suite() {
     echo "  MLflow endpoint is reachable"
 
     if [ "$INFERRED_UPGRADE_PHASE" = "post_upgrade" ]; then
-        echo "  Waiting for MLflow CR status.version to reach ${SUPPORTED_MLFLOW_VERSION_RAW}..."
-        if ! kubectl wait \
-            --for="jsonpath={.status.version}=${SUPPORTED_MLFLOW_VERSION_RAW}" \
-            "mlflow/${MLFLOW_NAME}" \
-            --namespace "$NAMESPACE" \
-            --timeout=300s; then
-            echo "ERROR: MLflow CR did not report status.version=${SUPPORTED_MLFLOW_VERSION_RAW} within timeout" >&2
-            return 1
-        fi
-        echo "  MLflow CR status.version matches ${SUPPORTED_MLFLOW_VERSION_RAW}"
+        echo "  Skipping MLflow CR status.version wait on rhoai-3.4"
     fi
 
     if [ "$SERVE_ARTIFACTS" = "false" ] && [ "$STORAGE_TYPE" = "s3" ] && \

@@ -71,42 +71,6 @@ def validate_upgrade_experiment_runs(test_context: TestContext) -> None:
         )
 
 
-def validate_upgrade_trace_sessions(test_context: TestContext) -> None:
-    """Validate the upgrade trace/session scenario."""
-    case = _require_case_payload(test_context, "case")
-    traces_by_session = test_context.upgrade_observed_state.get("traces_by_session", {})
-    attachment_contents = test_context.upgrade_observed_state.get("trace_attachment_contents", {})
-
-    for session_payload in case["sessions"]:
-        session_traces = traces_by_session.get(session_payload["session_id"], {})
-        assert len(session_traces) >= len(session_payload["traces"]), (
-            f"Expected at least {len(session_payload['traces'])} traces for session "
-            f"'{session_payload['session_id']}', found {len(session_traces)}"
-        )
-        for trace_payload in session_payload["traces"]:
-            trace = session_traces.get(trace_payload["trace_name"])
-            assert trace is not None, (
-                f"Trace '{trace_payload['trace_name']}' missing from session "
-                f"'{session_payload['session_id']}'"
-            )
-            metadata = trace.info.trace_metadata or {}
-            assert metadata.get("mlflow.trace.session") == session_payload["session_id"]
-            assert metadata.get("mlflow.trace.user") == session_payload["user"]
-
-            root_span = trace.data.spans[0]
-            assert root_span.inputs.get("message") == trace_payload["inputs"]["message"]
-            assert root_span.outputs.get("result") == trace_payload["outputs"]["result"]
-
-            if "attachment_content" not in trace_payload:
-                continue
-
-            actual_content = attachment_contents.get(trace_payload["trace_name"])
-            assert actual_content == trace_payload["attachment_content"], (
-                f"Attachment content mismatch for trace '{trace_payload['trace_name']}': "
-                f"expected '{trace_payload['attachment_content']}', got '{actual_content}'"
-            )
-
-
 def validate_upgrade_registered_models(test_context: TestContext) -> None:
     """Validate the upgrade registered-model/model-version scenario."""
     case = _require_case_payload(test_context, "case")
@@ -145,23 +109,3 @@ def validate_upgrade_registered_models(test_context: TestContext) -> None:
             )
 
 
-def validate_upgrade_prompts(test_context: TestContext) -> None:
-    """Validate the upgrade prompt/prompt-version scenario."""
-    case = _require_case_payload(test_context, "case")
-    for prompt_payload in case["prompts"]:
-        prompt = test_context.user_client.get_prompt(prompt_payload["name"])
-        assert prompt is not None, f"Prompt '{prompt_payload['name']}' not found"
-        assert prompt.description == prompt_payload["description"], (
-            f"Prompt '{prompt_payload['name']}' description mismatch: "
-            f"expected '{prompt_payload['description']}', got '{prompt.description}'"
-        )
-        for index, version_payload in enumerate(prompt_payload["versions"], start=1):
-            version = test_context.user_client.get_prompt_version(prompt_payload["name"], str(index))
-            assert str(version.version) == str(index)
-            assert version.description == version_payload["description"], (
-                f"Prompt '{prompt_payload['name']}' version '{index}' description mismatch: "
-                f"expected '{version_payload['description']}', got '{version.description}'"
-            )
-            assert version.template == version_payload["template"], (
-                f"Prompt '{prompt_payload['name']}' version '{index}' template mismatch"
-            )

@@ -17,7 +17,6 @@ The MLflow Operator automates the deployment and lifecycle management of MLflow 
 - **OpenShift Integration**: Automatic TLS certificate provisioning via service-ca-operator
 - **Flexible Storage**: Support for local PVC, remote databases (PostgreSQL), and remote artifact storage (S3, etc.)
 - **Persistent Storage**: Automatic PVC creation with configurable size and storage class
-- **Operator-Managed Database Migrations**: The operator can scale MLflow down, run a one-shot migration Job, and restore replicas during upgrades
 
 ## Getting Started
 
@@ -158,7 +157,9 @@ helm install mlflow . -n opendatahub --create-namespace \
   --set storage.size=20Gi
 ```
 
-The standalone Helm chart does not orchestrate MLflow database migrations. Bootstrap or migrate the database yourself before rolling out a standalone Helm upgrade.
+The standalone Helm chart does not orchestrate MLflow database schema changes.
+Bootstrap or migrate the database yourself before rolling out a standalone
+Helm upgrade.
 
 ## Configuration
 
@@ -239,29 +240,6 @@ kubectl create secret generic mlflow-db-credentials \
   --from-literal=registry-store-uri='postgresql://mlflow:password@postgres.example.com:5432/mlflow' \
   -n <namespace>
 ```
-
-### Database Migration
-
-Use `spec.migration.mode` to control operator-managed database migration orchestration:
-
-- `Automatic` (default) runs the migration Job on bootstrap and whenever `status.version` differs from the operator-supported MLflow version
-- `Always` runs the migration Job for each new desired generation, meaning each new revision of the MLflow resource after its desired state changes, before the MLflow Deployment is scaled back up
-- `spec.migration.ttlSecondsAfterFinished` optionally overrides how long finished migration Jobs are retained before Kubernetes TTL cleanup may delete them; when omitted, the operator defaults to 86400 seconds (24 hours), and values below 3600 seconds (1 hour) are rejected
-
-`status.version` records the supported MLflow version that most recently completed the operator-managed migration flow. The `Migration` status condition records the per-generation migration state using `observedGeneration`: `Unknown` while migration is in progress or retrying after a transient failure, `True` after success, and `False` after a terminal failure.
-
-Operator-managed migration only supports documented SQL metadata store URIs for the backend and registry stores: `sqlite://` and `postgresql://`. Inline `file://` backend or registry metadata URIs are intentionally rejected, and `file://` metadata stores are not supported for operator-managed migration.
-
-If `spec.image.image` overrides the default image, the operator still uses that image for the migration Job. This supports hotfix and test images, but it also means the operator does not prevalidate the custom image's migration runtime contract before scale-down, so an incompatible custom image can still fail after the MLflow Deployment has been scaled down and cause downtime.
-
-The operator keeps Kubernetes Job retries finite, but it automatically recreates fresh migration Jobs after a short delay for retryable failures such as transient database connectivity issues. Terminal failures, such as version mismatches, unsupported metadata store URIs, or known Alembic revision-resolution errors, stop automatic retries and instruct the admin to use `mlflow.opendatahub.io/force-migrate` after fixing the issue.
-
-To trigger a manual one-shot rerun, add the presence-based `mlflow.opendatahub.io/force-migrate` annotation to the MLflow resource. After a successful forced migration, the operator clears the annotation automatically. If a finished Job already exists for the current desired generation, the operator deletes it first so it can create the replacement Job with the same generated name.
-
-By default, finished migration Jobs remain visible for 24 hours before TTL cleanup may remove them. This means upgrades can leave a completed migration Job behind briefly in shared namespaces such as `redhat-ods-applications`, which gives admins time to inspect logs when needed.
-
-During the migration flow, the operator resolves the final MLflow image, scales the MLflow Deployment to zero, waits for all MLflow replicas to disappear, runs a one-shot Job against the backend and registry stores, verifies that the migration image reports the supported MLflow version, restores the requested replica count, and updates `status.version` only after the post-migration rollout is ready.
-For ODH/RHOAI MLflow images that ship `mlflow.store.db.migration_gap`, that Job also runs the backend-only RHOAI `3.3 -> 3.4` gap repair before the generic MLflow migration logic.
 
 ### CORS Configuration
 
@@ -365,7 +343,7 @@ See the [config/samples](./config/samples/) directory for complete examples:
 
 MLflow coverage is split between:
 
-- Go end-to-end tests in `test/e2e/`, including the operator-managed upgrade flow
+- Go end-to-end tests in `test/e2e/`
 - Python integration tests in `mlflow-tests/`
 
 `mlflow-tests` also includes opt-in upgrade-phase pytest modules under:
@@ -373,17 +351,24 @@ MLflow coverage is split between:
 - `mlflow-tests/tests/upgrade/pre_upgrade/`
 - `mlflow-tests/tests/upgrade/post_upgrade/`
 
-Versioned files such as `test_3_10.py` run only when the applicable version threshold is at least `3.10`. `pre_upgrade` gates on `MLFLOW_TEST_SUPPORTED_VERSION`; `post_upgrade` gates on the pre-upgrade version recorded in the `mlflow-upgrade-test-version` ConfigMap in `upgrade_test_workspace`.
+`rhoai-3.4` includes an upgrade pytest flow driven by `mlflow-tests/images/test-run.sh` and `.github/workflows/upgrade-validation.yml`.
+This branch runs only the current-version `pre_upgrade` and `post_upgrade` phases against MLflow `3.10.x`.
 
-For local runs, `bash mlflow-tests/images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` when needed, uses `upgrade_test_workspace` as the shared namespace and RBAC target for upgrade phases, and requires exactly one artifact backend for `pre_upgrade` or `post_upgrade`. The harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift` only when `route.openshift.io` resources are actually present; otherwise it uses the generic `base` overlay, and you can still override `INFRASTRUCTURE_PLATFORM` explicitly if needed. On OpenShift, the harness uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the older localhost port-forward path when needed. Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix, while `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path. A missing post-upgrade handoff ConfigMap still means there is no matching versioned dataset for that upgrade source and now exits cleanly as a successful skip, while malformed ConfigMap contents still fail fast. `.github/workflows/upgrade-validation.yml` now runs `current-upgrade-pytest-validation`, which exercises the upgrade-tagged pytest machinery itself on the current build and keeps additive datasets such as `3.11` covered, alongside `seeded-upgrade-state-validation`, which seeds a `3.10.1` deployment, patches the running operator deployment and MLflow CR to the PR-built images, and reuses that upgraded state for `post_upgrade` validation. `.github/workflows/integration-tests.yml` continues to focus on the normal current-version integration matrix.
+`pre_upgrade` gates on `MLFLOW_TEST_SUPPORTED_VERSION`, while `post_upgrade`
+gates on the version recorded in the `mlflow-upgrade-test-version` ConfigMap in
+`upgrade_test_workspace`. The harness derives
+`MLFLOW_TEST_SUPPORTED_VERSION=3.10` from `config/component_metadata.yaml`,
+requires exactly one artifact backend for upgrade phases, and skips waiting on
+`status.version` because `rhoai-3.4` does not publish that field during this
+test flow.
 
-## Shift-left Upgrade Validation
-
-This repository keeps a repo-local operator-chaos knowledge model at `chaos/knowledge/mlflow.yaml`. The accompanying `.github/workflows/operator-chaos.yml` pull request workflow validates that knowledge file, runs `operator-chaos preflight --local`, diffs the base and PR knowledge models, compares the checked-in MLflow CRD schema with `operator-chaos diff-crds`, previews upgrade scenarios with `operator-chaos simulate-upgrade --dry-run`, and fails the PR check when the knowledge or CRD diff reports breaking changes.
-
-This workflow is intentionally offline and asset-focused. It fails fast when validation, command execution, or breaking knowledge/CRD changes are detected, and logs the relevant operator-chaos output directly in the failing step. Update `chaos/knowledge/mlflow.yaml` whenever the stable RHOAI controller topology, default chart-managed MLflow resources, or checked-in MLflow CRD shape changes in ways that should affect upgrade modeling.
-
-This does not replace the existing runtime upgrade coverage. Continue to use `make test-e2e-upgrade` and the `upgrade-tests` job in `.github/workflows/upgrade-validation.yml` for live migration validation.
+For connectivity, the harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift`
+only when `route.openshift.io` resources are present; otherwise it uses the
+generic `base` overlay. On OpenShift, it uses the MLflow CR `status.url`
+gateway address by default, while `FORCE_PORT_FORWARD=true` forces the older
+localhost port-forward path when needed. Upgrade runs against source MLflow
+versions before `3.12` must use tracking URIs without the `/mlflow` static
+prefix.
 
 ## Troubleshooting
 

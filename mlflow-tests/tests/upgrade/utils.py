@@ -5,10 +5,10 @@ from __future__ import annotations
 from functools import lru_cache
 import logging
 from pathlib import Path
+import re
 
 from kubernetes import client as k8s_client
 from kubernetes.client.rest import ApiException
-from packaging.version import Version
 
 from mlflow_tests.utils.client import ClientManager
 from ..constants.config import Config
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 UPGRADE_PHASES = {"pre_upgrade", "post_upgrade"}
 REQUESTED_UPGRADE_PHASE = ""
 MISSING_POST_UPGRADE_DATASET = False
+MLFLOW_VERSION_RE = re.compile(r"^[vV]?(\d+)\.(\d+)")
 
 
 class MissingPreUpgradeVersionConfigMapError(RuntimeError):
@@ -61,10 +62,10 @@ def is_upgrade_phase(phase: str | None = None) -> bool:
 def normalize_mlflow_version(version: str) -> str:
     """Normalize an MLflow version string to ``major.minor``."""
     cleaned = (version or "").strip()
-    if cleaned.lower().startswith("v"):
-        cleaned = cleaned[1:]
-    parsed = Version(cleaned)
-    return f"{parsed.major}.{parsed.minor}"
+    match = MLFLOW_VERSION_RE.match(cleaned)
+    if match is None:
+        raise ValueError(f"Unable to normalize MLflow version {version!r}")
+    return f"{int(match.group(1))}.{int(match.group(2))}"
 
 
 def parse_minimum_version_from_path(path: str | Path) -> tuple[int, int] | None:
@@ -195,5 +196,7 @@ def should_run_versioned_test(path: str | Path, phase: str | None = None) -> boo
     effective_version = get_effective_pre_upgrade_version(phase)
     if effective_version is None:
         return False
-    effective = Version(effective_version)
-    return effective >= Version(f"{minimum[0]}.{minimum[1]}")
+    effective = parse_minimum_version_from_path(f"test_{effective_version.replace('.', '_')}.py")
+    if effective is None:
+        raise ValueError(f"Unable to parse effective MLflow version {effective_version!r}")
+    return effective >= minimum

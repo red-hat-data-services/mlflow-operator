@@ -97,8 +97,9 @@ The script is configured entirely via environment variables. Variables can also 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STORAGE_TYPE` | `file` | Artifact storage backend. Supported: `file`, `s3`. |
-| `BACKEND_STORE` | `sqlite` | Backend store type. Supported: `sqlite`, `postgres`. |
-| `REGISTRY_STORE` | `sqlite` | Registry store type. Supported: `sqlite`, `postgres`. |
+| `DB_TYPE` | `sqlite` | Metadata store backend. Supported: `sqlite`, `postgres`. |
+| `BACKEND_STORE` | `sqlite` | Preferred backend metadata store selector for the upgrade harness. |
+| `REGISTRY_STORE` | `sqlite` | Preferred registry metadata store selector for the upgrade harness. |
 | `AWS_ACCESS_KEY_ID` | _(unset)_ | S3 access key (`STORAGE_TYPE=s3` only). |
 | `AWS_SECRET_ACCESS_KEY` | _(unset)_ | S3 secret key (`STORAGE_TYPE=s3` only). |
 | `BUCKET` | _(unset)_ | S3 bucket name (`STORAGE_TYPE=s3` only). |
@@ -145,10 +146,32 @@ The script is configured entirely via environment variables. Variables can also 
 | `NAMESPACE` | `opendatahub` | Namespace where the MLflow Operator is deployed. |
 | `MLFLOW_SA_NAME` | `mlflow-sa` | Service account name created by the operator. |
 | `workspaces` | `workspace1-<random>,workspace2-<random>` | Comma-separated list of workspace namespaces to create and test against. |
-| `upgrade_test_workspace` | `mlflow-upgrade-test-workspace` | Static workspace namespace for upgrade pytest phases and their RBAC setup. |
+| `upgrade_test_workspace` | `mlflow-upgrade-test-workspace` | Static workspace namespace used by the upgrade pytest phases and their RBAC setup. |
 | `ARTIFACT_BACKENDS` | `file,s3` | Comma-separated artifact backends to run in sequence (`file`, `s3`, `externals3`). Upgrade pytest phases require exactly one value. |
+| `MLFLOW_TEST_SUPPORTED_VERSION` | derived from `config/component_metadata.yaml` | Normalized `x.y` source version used to gate versioned upgrade datasets. |
 | `TEST_RESULTS_DIR` | `/mlflow/results` | Directory for JUnit XML output. |
 | `DEPLOY_PY` | `<repo>/.github/actions/deploy/deploy.py` | Path to the deploy helper script. |
+
+`DB_TYPE` remains supported for Jenkins compatibility on `rhoai-3.4`, but new upgrade-harness wiring prefers `BACKEND_STORE` and `REGISTRY_STORE`.
+
+## Upgrade pytest phases
+
+The test image supports two opt-in upgrade phases:
+
+```bash
+# Seed static 3.10 upgrade state and preserve the deployment
+ARTIFACT_BACKENDS=file \
+SKIP_CLEANUP=true \
+bash images/test-run.sh -m pre_upgrade
+
+# Reuse the existing deployment after you update the operator/runtime image
+ARTIFACT_BACKENDS=file \
+SKIP_DEPLOYMENT=true \
+SKIP_CLEANUP=true \
+bash images/test-run.sh -m post_upgrade
+```
+
+On `rhoai-3.4`, both phases target MLflow `3.10.x`, so the harness uses unprefixed cluster endpoints instead of `/mlflow` and skips waiting for `status.version` in the MLflow custom resource.
 
 ## Storage configuration
 
@@ -185,6 +208,10 @@ BACKEND_STORE=postgres REGISTRY_STORE=postgres DB_HOST=... DB_PASSWORD=... bash 
   embedded in the MLflow server checks RBAC in the workspace namespace on every request, so these
   role bindings are required for the tests to pass.
 
+- **Tracking URI vs. static prefix**: standard RBAC runs still talk to the service root without `/mlflow`.
+  For `rhoai-3.4` upgrade pytest phases, the harness uses an unprefixed tracking
+  URI for MLflow `3.10.x`, but still probes `/mlflow/health` when checking that
+  the server is ready.
 - **Client/server version alignment**: the test client is installed from
   `opendatahub-io/mlflow@master` (pinned in `uv.lock`). The MLflow server image must be built from
   the same commit for the workspace feature probe endpoint to match. Use `MLFLOW_IMAGE` to supply

@@ -99,6 +99,8 @@ uv run pytest -m Models         # Registered model RBAC tests
 uv run pytest -m Traces         # Trace RBAC and direct trace-ingestion tests
 uv run pytest -m Artifacts      # Artifact operations and S3 storage tests
 uv run pytest -m smoke          # All smoke tests
+uv run pytest -m pre_upgrade    # Seed static upgrade state for the current MLflow version
+uv run pytest -m post_upgrade   # Validate static upgrade state after redeploy/reuse
 
 # Run in local mode (bypasses Kubernetes)
 LOCAL=true uv run pytest
@@ -138,7 +140,18 @@ upgrade_test_workspace=mlflow-upgrade-test-workspace \
 uv run pytest tests/upgrade/post_upgrade/test_3_10.py -m post_upgrade
 ```
 
-`bash images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` if it is unset. The test image also bakes the normalized value into `BASH_ENV` so direct image execution paths can rely on the same default without reimplementing the lookup. Harness-driven upgrade runs use `upgrade_test_workspace` for workspace creation and RBAC, default to `ARTIFACT_BACKENDS=file` when no backend is set, and require exactly one backend for `pre_upgrade`, `post_upgrade`, or `SKIP_CLEANUP=true`. For `post_upgrade`, the harness also waits for the MLflow health endpoint and the `MLflow` CR `status.version` to reach the current supported version before pytest starts. A missing `mlflow-upgrade-test-version` ConfigMap still means "no matching post-upgrade dataset for this source version" and now exits cleanly as a successful skip, while a present ConfigMap with empty or invalid handoff data still fails the run.
+`bash images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` if it is
+unset. The test image also bakes the normalized value into `BASH_ENV` so direct
+image execution paths can rely on the same default without reimplementing the
+lookup. Harness-driven upgrade runs use `upgrade_test_workspace` for workspace
+creation and RBAC, default to `ARTIFACT_BACKENDS=file` when no backend is set,
+and require exactly one backend for `pre_upgrade`, `post_upgrade`, or
+`SKIP_CLEANUP=true`. For `post_upgrade`, the harness waits for the MLflow health
+endpoint before pytest starts but, on `rhoai-3.4`, it intentionally skips any
+`status.version` wait. A missing `mlflow-upgrade-test-version` ConfigMap still
+means "no matching post-upgrade dataset for this source version" and now exits
+cleanly as a successful skip, while a present ConfigMap with empty or invalid
+handoff data still fails the run.
 
 The upgrade datasets use fixed resource names in a fixed namespace. If a local `pre_upgrade` run is interrupted or you want to reseed from scratch, delete the static namespace and the `mlflow-upgrade-test-version` ConfigMap before rerunning, or use a fresh cluster.
 
@@ -168,11 +181,17 @@ The framework defines the following custom pytest markers:
 
 - **`@pytest.mark.Experiments`**: Test experiment RBAC and management operations
 - **`@pytest.mark.Models`**: Test registered model RBAC and management operations
+- **`@pytest.mark.post_upgrade`**: Validate static upgrade state after a reused deployment is brought back
+- **`@pytest.mark.pre_upgrade`**: Seed static upgrade state before a redeploy or image swap
 - **`@pytest.mark.Traces`**: Test direct trace-ingestion RBAC and experiment-scoped trace authorization
 - **`@pytest.mark.Artifacts`**: Test artifact operations, model logging, and S3 storage verification
 - **`@pytest.mark.smoke`**: Fast sanity-check tests suitable for pre-merge smoke runs
 - **`@pytest.mark.pre_upgrade`**: Seed static MLflow state for upgrade validation
 - **`@pytest.mark.post_upgrade`**: Validate static MLflow state after an upgrade
+
+Upgrade markers are opt-in only. Run either `-m pre_upgrade` or `-m post_upgrade` exactly; compound marker expressions intentionally fall back to the normal RBAC suite.
+
+Versioned upgrade files are selected by `MLFLOW_TEST_SUPPORTED_VERSION`. On `rhoai-3.4`, the test image derives that value from `config/component_metadata.yaml`, so the current-version upgrade flow runs only the `3.10` dataset.
 
 ### Test Execution Workflow
 
