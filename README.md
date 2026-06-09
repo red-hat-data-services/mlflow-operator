@@ -153,18 +153,25 @@ Customize values:
 ```sh
 helm install mlflow . -n opendatahub --create-namespace \
   --set image.tag=v2.0.0 \
+  --set storage.accessMode=ReadWriteOnce \
   --set storage.size=20Gi
 ```
+
+The standalone Helm chart does not orchestrate MLflow database schema changes.
+Bootstrap or migrate the database yourself before rolling out a standalone
+Helm upgrade.
 
 ## Configuration
 
 ### Authentication and Security
 
-MLflow is deployed with the `kubernetes-auth` app enabled. The operator sets `MLFLOW_K8S_AUTH_AUTHORIZATION_MODE=self_subject_access_review`, so authorization checks are performed directly by MLflow using the caller's token—no special RBAC permissions are required beyond listing namespaces for the workspaces feature.
+MLflow is deployed with the `kubernetes-auth` app enabled. The operator sets `MLFLOW_K8S_AUTH_AUTHORIZATION_MODE=self_subject_access_review`, so authorization checks are performed directly by MLflow using the caller's token. For the server itself, no special RBAC permissions are required beyond listing namespaces for the workspaces feature.
 
 The deployment always sets `MLFLOW_DISABLE_TELEMETRY=true` and `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false` to disable telemetry and job execution by default.
 
 TLS is terminated inside the MLflow container using uvicorn options. Certificates come from the `mlflow-tls` secret, which is created automatically on OpenShift via the `service.beta.openshift.io/serving-cert-secret-name` annotation. If you need to provide your own certificates, place `tls.crt` and `tls.key` in a secret named `mlflow-tls` (or override `tls.secretName` in Helm values). On OpenShift, the operator sets `UVICORN_SSL_CIPHERS=PROFILE=SYSTEM` by default unless `spec.env` already defines that variable, so uvicorn follows the platform crypto policy, including FIPS-compatible TLS 1.2 and 1.3 cipher selection.
+
+When garbage collection is enabled, the CronJob runs under a separate `mlflow-gc-sa` ServiceAccount with its own `mlflow-gc` ClusterRole and ClusterRoleBinding.
 
 ### Operator RBAC Privileges
 
@@ -179,19 +186,22 @@ See the manifest files for detailed per-resource documentation.
 
 ### Storage Configuration
 
-`backendStoreUri` (or `backendStoreUriFrom`) is required on new creates and updates. To avoid breaking already-stored CRs created before this validation was introduced, the operator still falls back to the legacy implicit SQLite backend during reconciliation when both fields are unset.
+`backendStoreUri` (or `backendStoreUriFrom`) is required on new creates and updates. Inline `backendStoreUri` and `registryStoreUri` intentionally accept only the documented SQL schemes (`sqlite://` and `postgresql://`). To avoid breaking already-stored CRs created before this validation was introduced, the operator still falls back to the legacy implicit SQLite backend during reconciliation when both fields are unset.
 
 #### Local Storage (Development/Testing)
 ```yaml
 spec:
   storage:
-    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 10Gi
     storageClassName: ""  # Use default storage class
-    accessMode: ReadWriteOnce
-
   backendStoreUri: "sqlite:////mlflow/mlflow.db"
   registryStoreUri: "sqlite:////mlflow/mlflow.db"
   artifactsDestination: "file:///mlflow/artifacts"
+  serveArtifacts: true
 ```
 
 #### Remote Storage (Production)
@@ -209,6 +219,8 @@ spec:
     key: registry-store-uri  # postgresql://user:password@host:5432/dbname
 
   artifactsDestination: "s3://my-mlflow-bucket/artifacts"
+  defaultArtifactRoot: "s3://my-mlflow-bucket/artifacts/runs"
+  serveArtifacts: true
 
   # S3 credentials via secret
   envFrom:
@@ -327,6 +339,41 @@ See the [config/samples](./config/samples/) directory for complete examples:
 - `mlflow_v1_mlflow_remote_storage.yaml` - Remote PostgreSQL + S3 storage with horizontal scaling
 - `mlflow_v1_mlflowconfig.yaml` - Namespace-scoped artifact storage override using the upstream `MLflowConfig` CRD
 
+## Testing
+
+MLflow coverage is split between:
+
+- Go end-to-end tests in `test/e2e/`
+- Python integration tests in `mlflow-tests/`
+
+`mlflow-tests` also includes opt-in upgrade-phase pytest modules under:
+
+- `mlflow-tests/tests/upgrade/pre_upgrade/`
+- `mlflow-tests/tests/upgrade/post_upgrade/`
+
+`rhoai-3.4` includes an upgrade pytest flow driven by `mlflow-tests/images/test-run.sh` and `.github/workflows/upgrade-validation.yml`.
+This branch runs only the current-version `pre_upgrade` and `post_upgrade` phases against MLflow `3.10.x`.
+
+`pre_upgrade` gates on `MLFLOW_TEST_SUPPORTED_VERSION`, while `post_upgrade`
+gates on the version recorded in the `mlflow-upgrade-test-version` ConfigMap in
+`upgrade_test_workspace`. The harness derives
+`MLFLOW_TEST_SUPPORTED_VERSION=3.10` from `config/component_metadata.yaml`,
+requires exactly one artifact backend for upgrade phases, and skips waiting on
+`status.version` because `rhoai-3.4` does not publish that field during this
+test flow.
+
+For normal current-version multi-backend runs, `test-run.sh` now tears down the
+`MLflow` CR and any self-managed PostgreSQL or SeaweedFS infrastructure between
+backend suites so later suites do not inherit metadata from earlier ones.
+
+For connectivity, the harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift`
+only when `route.openshift.io` resources are present; otherwise it uses the
+generic `base` overlay. On OpenShift, it uses the MLflow CR `status.url`
+gateway address by default, while `FORCE_PORT_FORWARD=true` forces the older
+localhost port-forward path when needed. Upgrade runs against source MLflow
+versions before `3.12` must use tracking URIs without the `/mlflow` static
+prefix.
+
 ## Troubleshooting
 
 ### Common Issues
@@ -344,13 +391,9 @@ See the [config/samples](./config/samples/) directory for complete examples:
 **Storage issues**:
 - Ensure the PVC is bound: `kubectl get pvc -n <namespace>`
 - For remote storage, verify database/S3 credentials are correct
-- Check MLflow logs:
+- Check MLflow logs (the MLflow resource name is fixed to `mlflow`):
   ```bash
-  # For CR named "mlflow":
   kubectl logs -n <namespace> deployment/mlflow -c mlflow
-
-  # For CR with custom name (e.g., "production"):
-  kubectl logs -n <namespace> deployment/mlflow-production -c mlflow
   ```
 
 ### To Uninstall

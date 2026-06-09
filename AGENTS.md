@@ -68,6 +68,11 @@ make generate
 
 **Note**: Always regenerate manifests and code after modifying API types. CI will verify that generated code is up-to-date.
 
+When bumping the supported MLflow version, update
+`config/component_metadata.yaml` and any branch-specific workflow or harness
+assumptions that depend on that version. Top-level `scripts/` is preferred for
+developer-maintenance helpers like this.
+
 ## Deployment Modes
 
 The MLflow operator supports two deployment modes, configured via the `--mode` flag:
@@ -101,6 +106,7 @@ kustomize build config/overlays/odh | kubectl apply -f -
 ## Helm Chart
 
 The operator uses Helm charts to manage MLflow resources. The chart is located in `charts/mlflow/` and can be used standalone or via the operator.
+Standalone Helm deployments must not orchestrate database migrations; migration orchestration is operator-only.
 
 ## Helm Chart and MLflowSpec parity
 
@@ -129,6 +135,7 @@ charts/mlflow/
     ├── rbac.yaml
     ├── pvc.yaml
     ├── deployment.yaml           # MLflow server with kubernetes-auth and TLS
+    ├── cronjob.yaml              # Garbage collection CronJob
     └── service.yaml
 ```
 
@@ -152,8 +159,8 @@ The MLflow CR spec fields map directly to Helm chart values. See example configu
 
 MLflow has three independent storage components:
 
-1. **Backend Store** (experiment metadata): Supports `file://`, `sqlite://`, `postgresql://`, `mysql://`
-2. **Registry Store** (model registry metadata): Same schemes as backend store
+1. **Backend Store** (experiment metadata): Inline `backendStoreUri` supports `sqlite://` and `postgresql://`
+2. **Registry Store** (model registry metadata): Inline `registryStoreUri` supports the same SQL schemes as `backendStoreUri`
 3. **Artifacts Destination** (artifacts storage): Supports `file://`, `s3://`, `gs://`, `wasbs://`, `hdfs://`
 
 The `storage` field in the MLflow CR is **optional** and only needed for file-based storage:
@@ -174,9 +181,15 @@ Local storage (requires PVC):
 ```yaml
 spec:
   storage:
-    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 10Gi
   backendStoreUri: "sqlite:////mlflow/mlflow.db"
+  registryStoreUri: "sqlite:////mlflow/mlflow.db"
   artifactsDestination: "file:///mlflow/artifacts"
+  serveArtifacts: true
 ```
 
 Remote storage (no PVC):
@@ -228,6 +241,36 @@ make test-e2e-full
 make cleanup-kind-cluster
 ```
 
+### MLflow upgrade pytest phases
+
+The `mlflow-tests/` suite also contains opt-in, version-gated upgrade pytest coverage under:
+
+- `mlflow-tests/tests/upgrade/pre_upgrade/`
+- `mlflow-tests/tests/upgrade/post_upgrade/`
+
+Versioned files are named by the minimum supported MLflow major/minor version they apply to. For example, `test_3_10.py` runs only when the relevant pre-upgrade version is at least `3.10`. Ignore build suffixes such as `+rhaiv.3`; always normalize to `x.y`.
+
+Selection rules:
+
+- `pre_upgrade` files compare their filename threshold against `MLFLOW_TEST_SUPPORTED_VERSION`
+- `post_upgrade` files compare their filename threshold against the pre-upgrade version stored in the namespace-scoped ConfigMap `mlflow-upgrade-test-version`
+- The ConfigMap lives in the same static upgrade workspace namespace used by the seeded MLflow resources so pre/post phases share one namespace-scoped handoff point
+- A missing post-upgrade handoff ConfigMap is treated as "no matching versioned dataset for this source version" and should exit cleanly as a successful skip; malformed or empty ConfigMap contents must still fail the run instead of being treated as an empty selection
+- Harness-driven upgrade phases use the static `upgrade_test_workspace` namespace as the source of truth for both pytest setup and shell-harness RBAC/workspace creation
+- On `rhoai-3.4`, upgrade pytest phases target MLflow `3.10`, so the harness
+  uses a prefixless tracking URI for API calls while still probing
+  `/mlflow/health` for readiness checks
+- When `INFRASTRUCTURE_PLATFORM` is unset, `mlflow-tests/images/test-run.sh` must treat OpenShift as present only if `kubectl api-resources --api-group=route.openshift.io -o name` returns at least one resource; checking the command exit code alone misdetects Kind as OpenShift and breaks the upstream `postgres:13` overlay selection
+- On OpenShift, `mlflow-tests/images/test-run.sh` now uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the legacy localhost port-forward path when a run must bypass gateway routing
+- Normal current-version multi-backend `mlflow-tests/images/test-run.sh` runs must tear down the `MLflow` CR plus any self-managed PostgreSQL / SeaweedFS infrastructure between backend suites so the next suite does not inherit metadata or object-storage state from the prior one
+- Preserve the upgrade tracking-URI prefix logic on every connectivity path: seeded source versions before `3.12` still need a prefixless tracking URI even on the OpenShift `status.url` branch
+- Harness-driven upgrade phases require exactly one artifact backend; do not rely on the default multi-backend `file,s3` loop for `-m pre_upgrade` or `-m post_upgrade`
+- Harness-driven preserve/reuse flows also require exactly one artifact backend when `SKIP_CLEANUP=true`; reject ambiguous multi-backend preserve requests instead of preserving only the last backend
+- Harness-driven `SKIP_DEPLOYMENT=true` reuse runs preserve the reused `MLflow` CR and RBAC by default; set `CLEANUP_REUSED_RESOURCES=true` to opt into tearing down the reused `MLflow` CR, harness-managed RBAC, and any self-deployed PostgreSQL / SeaweedFS resources after validation
+- Local Fedora/SELinux validation of the containerized `mlflow-tests` harness can fail before pytest starts if the test image (runs as UID `1001`) cannot read `~/.kube/config` or write the mounted results directory. Treat these as host-environment blockers, not suite failures: when reproducing the workflow locally, prefer running the container as the host user (for example `--user "$(id -u):$(id -g)"`) and keep SELinux-friendly bind labels such as `:z` on shared mounts or `:Z` on private writable temp/result directories.
+
+These upgrade pytest suites are opt-in only. A plain `pytest -v` run should not execute them unless the pytest marker expression explicitly selects `pre_upgrade` or `post_upgrade`.
+
 ### Linting
 
 This repo uses golangci-lint; to ensure linting is successful after code changes, run
@@ -263,11 +306,14 @@ The `config/samples/` directory contains example MLflow custom resource configur
    - Manual TLS certificate management
    - Shows upstreamCASecret configuration
 
-4. **mlflow_v1_mlflow_remote_storage.yaml** - Remote storage
+4. **mlflow_v1_mlflow_remote_storage.yaml** - Remote storage with garbage collection
    - PostgreSQL for metadata
    - S3 for artifacts
    - No PVC required (fully remote)
    - Multi-replica deployment
+   - Periodic garbage collection via CronJob
+   - `mlflow-gc-sa` ServiceAccount for the CronJob
+   - `mlflow-gc` ClusterRole and ClusterRoleBinding for the CronJob
 
 5. **mlflow_v1_mlflow_digest.yaml** - Digest-based images
    - Uses SHA256 image digests for reproducibility
@@ -367,12 +413,15 @@ Validates sample CRs on every PR:
 - `verify-codegen.yml` - Validates generated code is up-to-date
 - `test.yml` - Runs unit tests
 - `lint.yml` - Runs golangci-lint
-- `integration-tests.yml` - Builds the operator image from this repo for all runs, but only builds the MLflow image from the aligned branch of `red-hat-data-services/mlflow` using `Dockerfile.konflux` for `red-hat-data-services` `rhoai-*` branches; other branches continue using the existing Quay image selection
+- `build-and-push-test-image.yml` - Publishes the public `quay.io/opendatahub/mlflow-tests` image for `main`, `release-*`, and `rhoai-*` branches as a multi-arch manifest covering `amd64` and `arm64`; keep `mlflow-tests/images/Dockerfile.konflux` downloads architecture-aware (`TARGETARCH`) whenever adding new CLI tooling
+- `integration-tests.yml` - Builds the operator image from this repo for all runs, but only builds the MLflow image from the aligned branch of `red-hat-data-services/mlflow` using `Dockerfile.konflux` for `red-hat-data-services` `rhoai-*` branches; other branches continue using the existing Quay image selection. The test harness auto-detects connectivity and uses the MLflow CR `status.url` on OpenShift unless `FORCE_PORT_FORWARD=true`.
+- `upgrade-validation.yml` - On `rhoai-3.4`, runs only the current-version upgrade pytest flow: `pre_upgrade` seeds static MLflow `3.10` state on the PR-built images, then `post_upgrade` reuses that same deployment. This branch intentionally does not carry the newer seeded historical-source workflow path, and `mlflow-tests/images/test-run.sh` must skip `status.version` waits because `rhoai-3.4` does not publish that status field during the test flow.
 - `test-e2e.yml` - Runs end-to-end tests
 - `verify-kustomize.yml` - Validates kustomize overlays
 
 **When modifying workflows:**
 - Follow existing patterns and naming conventions
+- Always pin external GitHub Actions or reusable workflow references to immutable commit SHAs rather than floating tags or branches; resolve the current SHA programmatically when updating them
 - Update AGENTS.md if adding new validation requirements
 - Test workflow changes in a fork before merging
 
@@ -384,3 +433,4 @@ Any agent working with this repo should always ensure:
 3. **README.md** references are consistent with actual sample files
 4. **GitHub workflows** will automatically validate samples—ensure changes pass CI checks
 5. **Code Comments** do not make self-evident code comments, especially when the information is plainly obvious looking at the code
+6. **`chaos/knowledge/mlflow.yaml`** stays aligned with the stable RHOAI operator and default MLflow steady-state topology; update it whenever controller-managed resources, the checked-in MLflow CRD, or the default chart/RBAC shape changes in ways the operator-chaos workflow should model

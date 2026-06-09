@@ -17,8 +17,6 @@ class Config:
     AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
     S3_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "")
     S3_BUCKET = os.getenv("AWS_S3_BUCKET", "")
-    BACKEND_STORE_URI: str = os.getenv("MLFLOW_BACKEND_STORE_URI", "postgresql://postgres:mysecretpassword@localhost:5432/mydatabase")
-
     WORKSPACE_LABEL_SELECTOR: str = os.getenv("WORKSPACE_LABEL_SELECTOR", "")
 
     WORKSPACES: list[str] = [
@@ -26,3 +24,11 @@ class Config:
         for workspace in os.getenv("workspaces", "workspace1,workspace2").split(",")
         if workspace.strip()  # Filter out empty strings after stripping
     ]
+
+    UPGRADE_SUPPORTED_VERSION: str = os.getenv("MLFLOW_TEST_SUPPORTED_VERSION", "").strip()
+    UPGRADE_VERSION_CONFIGMAP_NAME: str = "mlflow-upgrade-test-version"
+    UPGRADE_VERSION_CONFIGMAP_KEY: str = "pre_upgrade_version"
+    UPGRADE_TEST_WORKSPACE: str = os.getenv(
+        "upgrade_test_workspace",
+        os.getenv("upgrade_workspace", "mlflow-upgrade-test-workspace"),
+    ).strip()

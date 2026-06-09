@@ -1,0 +1,170 @@
+"""Atomic action helpers for MLflow upgrade pre/post validation."""
+
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+
+import mlflow
+from mlflow.exceptions import MlflowException
+
+from ..shared import TestContext
+from .utils import (
+    get_pre_upgrade_version_from_configmap,
+    get_supported_upgrade_version_from_env,
+    upsert_pre_upgrade_version_configmap,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def make_upgrade_state_action(action_name: str, **state_updates):
+    """Return an action that injects reusable upgrade state into the test context."""
+
+    def action(test_context: TestContext) -> None:
+        test_context.upgrade_state.update(state_updates)
+
+    action.__name__ = action_name
+    return action
+
+
+def _require_upgrade_payload(test_context: TestContext, key: str) -> dict:
+    payload = test_context.upgrade_state.get(key)
+    if payload is None:
+        raise ValueError(f"test_context.upgrade_state['{key}'] must be set before this action")
+    return payload
+
+
+def _is_missing_resource_error(exc: MlflowException) -> bool:
+    error_code = getattr(exc, "error_code", "")
+    message = str(exc)
+    return error_code == "RESOURCE_DOES_NOT_EXIST" or "RESOURCE_DOES_NOT_EXIST" in message
+
+
+def action_write_pre_upgrade_version_configmap(test_context: TestContext) -> None:
+    """Write the normalized supported MLflow version into the shared ConfigMap."""
+    version = get_supported_upgrade_version_from_env()
+    upsert_pre_upgrade_version_configmap(version)
+    test_context.upgrade_observed_state["pre_upgrade_version"] = version
+
+
+def action_read_pre_upgrade_version_configmap(test_context: TestContext) -> None:
+    """Read the normalized pre-upgrade MLflow version from the shared ConfigMap."""
+    test_context.upgrade_observed_state["pre_upgrade_version"] = (
+        get_pre_upgrade_version_from_configmap()
+    )
+
+
+def action_ensure_upgrade_experiment(test_context: TestContext) -> None:
+    """Create the current upgrade experiment if needed and store its identifier."""
+    experiment = _require_upgrade_payload(test_context, "current_experiment")
+    experiment_name = experiment["experiment_name"]
+    existing = mlflow.get_experiment_by_name(experiment_name)
+    if existing is not None:
+        raise AssertionError(
+            f"Upgrade experiment '{experiment_name}' already exists in workspace "
+            f"'{test_context.active_workspace}'. Clean the static upgrade workspace before reseeding."
+        )
+    experiment_id = mlflow.create_experiment(experiment_name)
+    logger.info("Created upgrade experiment '%s' with id %s", experiment_name, experiment_id)
+
+    test_context.active_experiment_id = experiment_id
+    test_context.upgrade_state["active_experiment_name"] = experiment_name
+    test_context.upgrade_observed_state["experiment_id"] = experiment_id
+
+
+def action_start_upgrade_run(test_context: TestContext) -> None:
+    """Start the current upgrade run inside the active experiment."""
+    run_payload = _require_upgrade_payload(test_context, "current_run")
+    if not test_context.active_experiment_id:
+        raise ValueError("active_experiment_id must be set before starting an upgrade run")
+    run = mlflow.start_run(
+        experiment_id=test_context.active_experiment_id,
+        run_name=run_payload["run_name"],
+    )
+    test_context.current_run_id = run.info.run_id
+    test_context.upgrade_observed_state.setdefault("run_ids", {})[run_payload["run_name"]] = (
+        run.info.run_id
+    )
+
+
+def action_log_upgrade_run_params(test_context: TestContext) -> None:
+    """Log the configured parameter set for the active upgrade run."""
+    run_payload = _require_upgrade_payload(test_context, "current_run")
+    for key, value in run_payload["params"].items():
+        mlflow.log_param(key, value)
+
+
+def action_log_upgrade_run_metrics(test_context: TestContext) -> None:
+    """Log the configured metric set for the active upgrade run."""
+    run_payload = _require_upgrade_payload(test_context, "current_run")
+    for key, value in run_payload["metrics"].items():
+        mlflow.log_metric(key, value)
+
+
+def action_log_upgrade_text_artifact(test_context: TestContext) -> None:
+    """Create and log the configured upgrade artifact under its stable filename."""
+    run_payload = _require_upgrade_payload(test_context, "current_run")
+
+    target_name = run_payload["artifact_file"]
+    normalized_name = os.path.normpath(target_name)
+    if (
+        os.path.isabs(normalized_name)
+        or normalized_name.startswith("..")
+        or "/" in target_name
+        or "\\" in target_name
+    ):
+        raise ValueError(f"Invalid artifact_file path: {target_name!r}")
+    with tempfile.TemporaryDirectory(prefix="mlflow-upgrade-artifact-") as artifact_dir:
+        target_path = os.path.join(artifact_dir, normalized_name)
+        artifact_dir_realpath = os.path.realpath(artifact_dir)
+        target_path_realpath = os.path.realpath(target_path)
+        if os.path.commonpath([artifact_dir_realpath, target_path_realpath]) != artifact_dir_realpath:
+            raise ValueError(
+                f"artifact_file must stay within the temporary artifact directory: {target_name!r}"
+            )
+        with open(target_path, "w", encoding="utf-8") as target:
+            target.write(run_payload["artifact_content"])
+        mlflow.log_artifact(target_path)
+
+
+def action_ensure_upgrade_registered_model(test_context: TestContext) -> None:
+    """Create the current upgrade registered model if needed."""
+    model_payload = _require_upgrade_payload(test_context, "current_registered_model")
+    model_name = model_payload["name"]
+    try:
+        test_context.user_client.get_registered_model(model_name)
+        raise AssertionError(
+            f"Upgrade registered model '{model_name}' already exists in workspace "
+            f"'{test_context.active_workspace}'. Clean the static upgrade workspace before reseeding."
+        )
+    except MlflowException as exc:
+        if not _is_missing_resource_error(exc):
+            raise
+        test_context.user_client.create_registered_model(model_name)
+        logger.info("Created upgrade registered model '%s'", model_name)
+    test_context.active_model_name = model_name
+
+
+def action_create_upgrade_model_version(test_context: TestContext) -> None:
+    """Create a model version for the current registered model from the active run."""
+    version_payload = _require_upgrade_payload(test_context, "current_model_version")
+    if not test_context.current_run_id:
+        raise ValueError("current_run_id must be set before creating a model version")
+    if not test_context.active_model_name:
+        raise ValueError("active_model_name must be set before creating a model version")
+
+    source = f"runs:/{test_context.current_run_id}/model"
+    model_version = test_context.user_client.create_model_version(
+        name=test_context.active_model_name,
+        source=source,
+        run_id=test_context.current_run_id,
+        description=version_payload["description"],
+    )
+    test_context.upgrade_observed_state.setdefault("model_versions", {}).setdefault(
+        test_context.active_model_name,
+        [],
+    ).append(model_version.version)
+
+

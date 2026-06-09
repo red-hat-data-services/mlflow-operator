@@ -743,6 +743,10 @@ class MLflowDeployer:
         # infra certs are gathered) handles the propagation wait internally.
 
         # Base CR structure
+        image_pull_policy = "Always"
+        if self.args.mlflow_image.startswith(("localhost/", "kind-registry:")):
+            image_pull_policy = "IfNotPresent"
+
         mlflow_cr = {
             "apiVersion": "mlflow.opendatahub.io/v1",
             "kind": "MLflow",
@@ -753,7 +757,7 @@ class MLflowDeployer:
             "spec": {
                 "image": {
                     "image": self.args.mlflow_image,
-                    "imagePullPolicy": "Always"
+                    "imagePullPolicy": image_pull_policy
                 }
             }
         }

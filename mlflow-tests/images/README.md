@@ -16,29 +16,52 @@ then exercising experiment, model, and artifact operations as users with varying
 
 ## Running tests locally (out-of-cluster)
 
-In out-of-cluster mode the script port-forwards the MLflow service to `localhost:8443` so the test
-client can reach it from your machine.
+On generic Kubernetes, the harness port-forwards the MLflow service to `localhost:8443` so the test
+client can reach it from your machine. On OpenShift, it instead uses the MLflow CR `status.url`
+gateway address by default. Set `FORCE_PORT_FORWARD=true` if you need the old localhost path on
+OpenShift as well.
 
 ```bash
 cd mlflow-tests
 
 # Full run: deploys MLflow, runs tests, cleans up
-IN_CLUSTER_MODE=false bash images/test-run.sh
+bash images/test-run.sh
 
 # Use a custom MLflow server image (recommended when testing against a specific commit)
-IN_CLUSTER_MODE=false MLFLOW_IMAGE=quay.io/opendatahub/mlflow:master bash images/test-run.sh
+MLFLOW_IMAGE=quay.io/opendatahub/mlflow:master bash images/test-run.sh
+
+# Force localhost port-forwarding even on OpenShift
+FORCE_PORT_FORWARD=true bash images/test-run.sh
 
 # Skip deployment (MLflow CR already exists on the cluster)
-IN_CLUSTER_MODE=false SKIP_DEPLOYMENT=true bash images/test-run.sh
+SKIP_DEPLOYMENT=true bash images/test-run.sh
 
 # Skip cleanup (leave the MLflow CR and role bindings in place after the run)
-IN_CLUSTER_MODE=false SKIP_CLEANUP=true bash images/test-run.sh
+ARTIFACT_BACKENDS=file SKIP_CLEANUP=true bash images/test-run.sh
+
+# Preserve the seeded deployment for later post-upgrade validation.
+SKIP_CLEANUP=true \
+bash images/test-run.sh -m pre_upgrade
+
+# Reuse that preserved deployment for post-upgrade checks.
+SKIP_DEPLOYMENT=true \
+bash images/test-run.sh -m post_upgrade
+
+# Also delete the reused MLflow resources after the post-upgrade run.
+SKIP_DEPLOYMENT=true \
+CLEANUP_REUSED_RESOURCES=true \
+bash images/test-run.sh -m post_upgrade
 ```
 
-## Running tests in-cluster (CI / container)
+If the preserved deployment includes self-deployed PostgreSQL or SeaweedFS,
+`CLEANUP_REUSED_RESOURCES=true` removes those harness-managed resources too.
 
-When running inside the test container (as CI does), the script connects directly to the MLflow
-service via its cluster-internal DNS name, bypassing the OpenShift gateway entirely.
+## Running tests in a container / CI
+
+The test container still runs outside the MLflow pod network namespace, so connectivity follows the
+same rules as other out-of-cluster runs: OpenShift uses the MLflow CR `status.url` by default,
+while generic Kubernetes uses localhost port-forwarding. Use `FORCE_PORT_FORWARD=true` to force the
+localhost path on OpenShift when needed.
 
 ```bash
 # From the repository root
@@ -49,7 +72,6 @@ podman build -f mlflow-tests/images/Dockerfile.konflux -t mlflow-tests:latest .
 podman run --rm \
   --user root \
   -v $HOME/.kube:/mlflow/.kube:z \
-  -e IN_CLUSTER_MODE=false \
   mlflow-tests:latest
 ```
 
@@ -76,15 +98,17 @@ The script is configured entirely via environment variables. Variables can also 
 |----------|---------|-------------|
 | `STORAGE_TYPE` | `file` | Artifact storage backend. Supported: `file`, `s3`. |
 | `DB_TYPE` | `sqlite` | Metadata store backend. Supported: `sqlite`, `postgres`. |
+| `BACKEND_STORE` | `sqlite` | Preferred backend metadata store selector for the upgrade harness. |
+| `REGISTRY_STORE` | `sqlite` | Preferred registry metadata store selector for the upgrade harness. |
 | `AWS_ACCESS_KEY_ID` | _(unset)_ | S3 access key (`STORAGE_TYPE=s3` only). |
 | `AWS_SECRET_ACCESS_KEY` | _(unset)_ | S3 secret key (`STORAGE_TYPE=s3` only). |
 | `BUCKET` | _(unset)_ | S3 bucket name (`STORAGE_TYPE=s3` only). |
 | `S3_ENDPOINT_URL` | _(unset)_ | S3 endpoint URL (`STORAGE_TYPE=s3` only). |
-| `DB_HOST` | _(auto)_ | PostgreSQL hostname (`DB_TYPE=postgres` only). |
-| `DB_PORT` | `5432` | PostgreSQL port (`DB_TYPE=postgres` only). |
-| `DB_USER` | `postgres` | PostgreSQL username (`DB_TYPE=postgres` only). |
-| `DB_PASSWORD` | _(unset)_ | PostgreSQL password (`DB_TYPE=postgres` only). |
-| `DB_NAME` | `mydatabase` | PostgreSQL database name (`DB_TYPE=postgres` only). |
+| `DB_HOST` | _(auto)_ | PostgreSQL hostname (when either metadata store uses `postgres`). |
+| `DB_PORT` | `5432` | PostgreSQL port (when either metadata store uses `postgres`). |
+| `DB_USER` | `postgres` | PostgreSQL username (when either metadata store uses `postgres`). |
+| `DB_PASSWORD` | _(unset)_ | PostgreSQL password (when either metadata store uses `postgres`). |
+| `DB_NAME` | `mydatabase` | PostgreSQL database name (when either metadata store uses `postgres`). |
 | `DB_SSLMODE` | _(unset)_ | SSL mode for the PostgreSQL connection URI. |
 
 ### Infrastructure image overrides
@@ -102,7 +126,8 @@ The script is configured entirely via environment variables. Variables can also 
 | `MLFLOW_OPERATOR_OWNER` | `opendatahub-io` | GitHub owner for CSV manifest download. |
 | `MLFLOW_OPERATOR_REPO` | `mlflow-operator` | GitHub repo name for CSV manifest download. |
 | `MLFLOW_OPERATOR_BRANCH` | `main` | Branch to pull manifests from for CSV patching. |
-| `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `kind` or `openshift`. Auto-derived from `DEPLOY_MLFLOW_OPERATOR`. |
+| `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `base` or `openshift`. When unset, the harness inspects `route.openshift.io` and selects `openshift` only if route resources are actually present; otherwise it uses `base`. |
+| `FORCE_PORT_FORWARD` | `false` | Force the harness to port-forward the MLflow service to `localhost:8443` even on OpenShift, instead of using the MLflow CR `status.url`. |
 
 ### Skip / control flags
 
@@ -111,7 +136,8 @@ The script is configured entirely via environment variables. Variables can also 
 | `SKIP_DEPLOYMENT` | `false` | Skip all cluster deployment (use pre-existing resources). |
 | `SKIP_OPERATOR` | `false` | Skip operator deployment only. |
 | `SKIP_INFRASTRUCTURE` | `false` | Skip PostgreSQL/SeaweedFS deployment. |
-| `SKIP_CLEANUP` | `false` | Leave resources in place after the run (useful for debugging). |
+| `SKIP_CLEANUP` | `false` | Leave the deployment in place after the run. Requires exactly one backend; use it for inspection or later reuse. |
+| `CLEANUP_REUSED_RESOURCES` | `false` | With `SKIP_DEPLOYMENT=true`, also delete the reused MLflow CR, harness-managed RBAC, and any self-deployed PostgreSQL/SeaweedFS resources at the end of the run. |
 
 ### Other
 
@@ -119,10 +145,33 @@ The script is configured entirely via environment variables. Variables can also 
 |----------|---------|-------------|
 | `NAMESPACE` | `opendatahub` | Namespace where the MLflow Operator is deployed. |
 | `MLFLOW_SA_NAME` | `mlflow-sa` | Service account name created by the operator. |
-| `IN_CLUSTER_MODE` | `true` | Set to `false` for local out-of-cluster runs (enables port-forwarding). |
 | `workspaces` | `workspace1-<random>,workspace2-<random>` | Comma-separated list of workspace namespaces to create and test against. |
+| `upgrade_test_workspace` | `mlflow-upgrade-test-workspace` | Static workspace namespace used by the upgrade pytest phases and their RBAC setup. |
+| `ARTIFACT_BACKENDS` | `file,s3` | Comma-separated artifact backends to run in sequence (`file`, `s3`, `externals3`). Upgrade pytest phases require exactly one value. |
+| `MLFLOW_TEST_SUPPORTED_VERSION` | derived from `config/component_metadata.yaml` | Normalized `x.y` source version used to gate versioned upgrade datasets. |
 | `TEST_RESULTS_DIR` | `/mlflow/results` | Directory for JUnit XML output. |
 | `DEPLOY_PY` | `<repo>/.github/actions/deploy/deploy.py` | Path to the deploy helper script. |
+
+`DB_TYPE` remains supported for Jenkins compatibility on `rhoai-3.4`, but new upgrade-harness wiring prefers `BACKEND_STORE` and `REGISTRY_STORE`.
+
+## Upgrade pytest phases
+
+The test image supports two opt-in upgrade phases:
+
+```bash
+# Seed static 3.10 upgrade state and preserve the deployment
+ARTIFACT_BACKENDS=file \
+SKIP_CLEANUP=true \
+bash images/test-run.sh -m pre_upgrade
+
+# Reuse the existing deployment after you update the operator/runtime image
+ARTIFACT_BACKENDS=file \
+SKIP_DEPLOYMENT=true \
+SKIP_CLEANUP=true \
+bash images/test-run.sh -m post_upgrade
+```
+
+On `rhoai-3.4`, both phases target MLflow `3.10.x`, so the harness uses unprefixed cluster endpoints instead of `/mlflow` and skips waiting for `status.version` in the MLflow custom resource.
 
 ## Storage configuration
 
@@ -131,7 +180,7 @@ The script is configured entirely via environment variables. Variables can also 
 Uses SQLite for metadata and a local PVC for artifacts. Suitable for quick local testing.
 
 ```bash
-STORAGE_TYPE=file DB_TYPE=sqlite bash images/test-run.sh
+STORAGE_TYPE=file BACKEND_STORE=sqlite REGISTRY_STORE=sqlite bash images/test-run.sh
 ```
 
 ### S3 artifact storage
@@ -145,13 +194,11 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... BUCKET=my-bucket S3_ENDPOINT_URL
 
 ### PostgreSQL metadata store
 
-**NOTE**: This hasn't been implemented for integration testing yet.
-
-Requires `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, and `DB_NAME` to be configured (via `.env`
-or environment variables).
+Set one or both metadata stores to `postgres`, then configure `DB_HOST`, `DB_PORT`, `DB_USER`,
+`DB_PASSWORD`, and `DB_NAME` (via `.env` or environment variables).
 
 ```bash
-DB_TYPE=postgres DB_HOST=... DB_PASSWORD=... bash images/test-run.sh
+BACKEND_STORE=postgres REGISTRY_STORE=postgres DB_HOST=... DB_PASSWORD=... bash images/test-run.sh
 ```
 
 ## Architecture notes
@@ -161,11 +208,10 @@ DB_TYPE=postgres DB_HOST=... DB_PASSWORD=... bash images/test-run.sh
   embedded in the MLflow server checks RBAC in the workspace namespace on every request, so these
   role bindings are required for the tests to pass.
 
-- **Tracking URI vs. static prefix**: the MLflow server is deployed with `--static-prefix=/mlflow`,
-  which prefixes UI, health, and ajax-api routes. The Python client uses REST API routes
-  (`/api/2.0/mlflow/...`) which are **not** affected by the static prefix. `MLFLOW_TRACKING_URI`
-  must therefore point at the service root without `/mlflow`.
-
+- **Tracking URI vs. static prefix**: standard RBAC runs still talk to the service root without `/mlflow`.
+  For `rhoai-3.4` upgrade pytest phases, the harness uses an unprefixed tracking
+  URI for MLflow `3.10.x`, but still probes `/mlflow/health` when checking that
+  the server is ready.
 - **Client/server version alignment**: the test client is installed from
   `opendatahub-io/mlflow@master` (pinned in `uv.lock`). The MLflow server image must be built from
   the same commit for the workspace feature probe endpoint to match. Use `MLFLOW_IMAGE` to supply
