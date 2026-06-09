@@ -362,6 +362,10 @@ requires exactly one artifact backend for upgrade phases, and skips waiting on
 `status.version` because `rhoai-3.4` does not publish that field during this
 test flow.
 
+For normal current-version multi-backend runs, `test-run.sh` now tears down the
+`MLflow` CR and any self-managed PostgreSQL or SeaweedFS infrastructure between
+backend suites so later suites do not inherit metadata from earlier ones.
+
 For connectivity, the harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift`
 only when `route.openshift.io` resources are present; otherwise it uses the
 generic `base` overlay. On OpenShift, it uses the MLflow CR `status.url`

@@ -153,6 +153,10 @@ means "no matching post-upgrade dataset for this source version" and now exits
 cleanly as a successful skip, while a present ConfigMap with empty or invalid
 handoff data still fails the run.
 
+For normal current-version multi-backend runs, the harness now tears down the
+`MLflow` CR and any self-managed PostgreSQL or SeaweedFS resources between
+backend suites so later suites start from a clean backend state.
+
 The upgrade datasets use fixed resource names in a fixed namespace. If a local `pre_upgrade` run is interrupted or you want to reseed from scratch, delete the static namespace and the `mlflow-upgrade-test-version` ConfigMap before rerunning, or use a fresh cluster.
 
 To preserve the seeded deployment for later inspection or reuse:
