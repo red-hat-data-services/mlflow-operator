@@ -44,6 +44,7 @@ To add or modify fields in the MLflow resource:
    ```bash
    make manifests generate
    ```
+   The Makefile intentionally scopes `controller-gen` to the root controller package and the nested `api/` module so nested repo copies or temp trees inside the workspace do not pollute generated output. Keep the Kubernetes dependency versions in the root module and `api/go.mod` aligned so generation runs against the same API types the operator binary uses.
 
 3. The CRDs will be updated at:
    - `config/crd/bases/mlflow.opendatahub.io_mlflows.yaml`
@@ -149,7 +150,7 @@ The Helm chart does not create an OpenShift Route. Create your own Route if you 
 ### Customizing Values
 
 The MLflow CR spec fields map directly to Helm chart values. See example configurations:
-- `config/samples/mlflow_v1_mlflow.yaml` - Local storage (SQLite + file-based artifacts)
+- `config/samples/mlflow_v1_mlflow.yaml` - Local storage (SQLite + file-based artifacts) with a commented DRA example
 - `config/samples/mlflow_v1_mlflow_remote_storage.yaml` - Remote storage (PostgreSQL + S3)
 
 ### Storage Configuration
@@ -277,6 +278,9 @@ Selection rules:
 - Harness-driven upgrade phases use the static `upgrade_test_workspace` namespace as the source of truth for both pytest setup and shell-harness RBAC/workspace creation
 - Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix; `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path
 - When `INFRASTRUCTURE_PLATFORM` is unset, `mlflow-tests/images/test-run.sh` must treat OpenShift as present only if `kubectl api-resources --api-group=route.openshift.io -o name` returns at least one resource; checking the command exit code alone misdetects Kind as OpenShift and breaks the upstream `postgres:13` overlay selection
+- On OpenShift, `mlflow-tests/images/test-run.sh` now uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the legacy localhost port-forward path when a run must bypass gateway routing
+- Normal current-version multi-backend `mlflow-tests/images/test-run.sh` runs must tear down the `MLflow` CR plus any self-managed PostgreSQL / SeaweedFS infrastructure between backend suites so the next suite does not inherit metadata or object-storage state from the prior one
+- Preserve the upgrade tracking-URI prefix logic on every connectivity path: seeded source versions before `3.12` still need a prefixless tracking URI even on the OpenShift `status.url` branch
 - Harness-driven upgrade phases require exactly one artifact backend; do not rely on the default multi-backend `file,s3` loop for `-m pre_upgrade` or `-m post_upgrade`
 - Harness-driven preserve/reuse flows also require exactly one artifact backend when `SKIP_CLEANUP=true`; reject ambiguous multi-backend preserve requests instead of preserving only the last backend
 - Harness-driven `SKIP_DEPLOYMENT=true` reuse runs preserve the reused `MLflow` CR and RBAC by default; set `CLEANUP_REUSED_RESOURCES=true` to opt into tearing down the reused `MLflow` CR, harness-managed RBAC, and any self-deployed PostgreSQL / SeaweedFS resources after validation
@@ -309,6 +313,7 @@ The `config/samples/` directory contains example MLflow custom resource configur
    - OpenShift deployment with service-ca certificates
    - Local storage (SQLite + file-based artifacts)
    - TLS terminated by MLflow (uvicorn) using service-ca certs
+   - Includes a commented `spec.resourceClaims` plus `spec.resources.claims` Dynamic Resource Allocation example
 
 2. **mlflow_v1_mlflow_minimal.yaml** - Minimal configuration
    - Local storage with minimal resources
@@ -426,8 +431,8 @@ Validates sample CRs on every PR:
 - `verify-codegen.yml` - Validates generated code is up-to-date
 - `test.yml` - Runs unit tests
 - `lint.yml` - Runs golangci-lint
-- `build-and-push-test-image.yml` - Publishes the public `quay.io/opendatahub/mlflow-tests` image for `main`, `release-*`, and `rhoai-*` branches as a multi-arch manifest covering `amd64`, `arm64`, `ppc64le`, and `s390x`; keep `mlflow-tests/images/Dockerfile.konflux` downloads architecture-aware (`TARGETARCH`) whenever adding new CLI tooling
-- `integration-tests.yml` - Normal MLflow runtime workflow for push and pull request validation. It builds one operator image artifact from this repository, one MLflow runtime image artifact from the matching owner MLflow repository, and one `mlflow-tests` image artifact from this repository, then reuses those artifacts in the current-version integration matrix by executing the test image as the harness entrypoint. The one intentional exception is ODH default-branch parity: operator `main` maps to `opendatahub-io/mlflow@master`. The operator image build uses `Dockerfile.konflux` when that file exists in the checked-out branch and falls back to `Dockerfile` otherwise. Built-image version alignment remains RHDS-only, and ODH push/PR activity targeting `main` still verifies the default image version from the checked-out repo without depending on the runtime-image build job.
+- `build-and-push-test-image.yml` - Publishes the public `quay.io/opendatahub/mlflow-tests` image for `main`, `release-*`, and `rhoai-*` branches as a multi-arch manifest covering `amd64` and `arm64`; keep `mlflow-tests/images/Dockerfile.konflux` downloads architecture-aware (`TARGETARCH`) whenever adding new CLI tooling
+- `integration-tests.yml` - Normal MLflow runtime workflow for push and pull request validation. It builds one operator image artifact from this repository, one MLflow runtime image artifact from the matching owner MLflow repository, and one `mlflow-tests` image artifact from this repository, then reuses those artifacts in the current-version integration matrix by executing the test image as the harness entrypoint. The one intentional exception is ODH default-branch parity: operator `main` maps to `opendatahub-io/mlflow@master`. The operator image build uses `Dockerfile.konflux` when that file exists in the checked-out branch and falls back to `Dockerfile` otherwise. Built-image version alignment remains RHDS-only, and ODH push/PR activity targeting `main` still verifies the default image version from the checked-out repo without depending on the runtime-image build job. The workflow also carries a Jenkins-like multi-backend matrix row that runs `file,s3` in a single `test-run.sh` invocation so between-suite teardown regressions are exercised in CI.
 - `upgrade-validation.yml` - Upgrade-focused MLflow workflow for push and pull request validation. It builds and reuses the same operator, runtime, and test image artifacts for two complementary marker-validation jobs plus the upgrade-path e2e job. `current-upgrade-pytest-validation` runs `mlflow-tests` `pre_upgrade` / `post_upgrade` directly on the PR-built images so the upgrade-tagged pytest machinery itself and additive datasets such as `3.11` stay exercised. `seeded-upgrade-state-validation` seeds a `3.10.1`-compatible source deployment, patches the running operator Deployment and seeded MLflow CR in place to the PR-built images, and then runs the `mlflow-tests` `post_upgrade` suite against that upgraded state across both file and S3 artifact backends. The `build-mlflow-tests-image` job also verifies that the direct-execution test image exposes the repo's normalized supported MLflow version through `MLFLOW_TEST_SUPPORTED_VERSION`, matching the Jenkins-style container entry path. Upgrade tests use a pinned ODH release 1.1 seed image digest (`v3.10.1+rhaiv.3`) instead of rebuilding `test/e2e/images/mlflow-3.10.0.Dockerfile`, which was removed after its `microdnf`-based Python reinstall started pulling an incompatible sqlite runtime; the workflow retags that digest to a local seed tag before `kind load` and deployment so containerd does not have to resolve the digest-only reference during container creation. Failed jobs upload debug artifacts with namespace snapshots plus operator, MLflow, and migration-job pod logs and descriptions when available.
 - `operator-chaos.yml` - Offline operator-chaos upgrade-risk gate. It validates `chaos/knowledge/mlflow.yaml`, runs `operator-chaos preflight --local`, diffs the base and PR knowledge models with `operator-chaos diff --breaking`, compares the checked-in MLflow CRD schema with `operator-chaos diff-crds`, previews generated upgrade experiments with `operator-chaos simulate-upgrade --dry-run`, and fails fast when validation, command execution, or breaking knowledge/CRD changes are reported. This workflow is intentionally asset-focused and does not create a cluster or execute live chaos experiments.
 - `verify-mlflow-version-alignment.yml` - Scheduled ODH-only default-image alignment check. It runs directly from the checked-out operator repo and verifies the `config/base/params.env` plus `config/overlays/kind/params.env` defaults against the supported MLflow version metadata without instantiating the heavier integration workflow.

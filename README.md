@@ -240,6 +240,28 @@ kubectl create secret generic mlflow-db-credentials \
   -n <namespace>
 ```
 
+### Dynamic Resource Allocation
+
+Use `spec.resourceClaims` for pod-level Dynamic Resource Allocation (DRA) claims, then reference those claims from `spec.resources.claims` so the MLflow container can consume the allocated resource:
+
+```yaml
+spec:
+  resourceClaims:
+    - name: shared-gpu
+      resourceClaimTemplateName: shared-gpu-template
+  resources:
+    claims:
+      - name: shared-gpu
+        request: gpu
+```
+
+`resourceClaims` is optional and requires the Kubernetes `DynamicResourceAllocation` feature gate when running on clusters that still gate the field.
+For each `spec.resourceClaims[]` entry, set exactly one non-empty value:
+- `resourceClaimName` to reference an existing claim
+- `resourceClaimTemplateName` to create a claim from a template
+
+Setting both, neither, or an empty string value is rejected by CRD validation.
+
 ### Database Migration
 
 Use `spec.migration.mode` to control operator-managed database migration orchestration:
@@ -357,9 +379,13 @@ When CA bundles are present (platform or custom), PostgreSQL connections use `PG
 ### Example Configurations
 
 See the [config/samples](./config/samples/) directory for complete examples:
-- `mlflow_v1_mlflow.yaml` - OpenShift deployment with local storage and service-ca TLS
+- `mlflow_v1_mlflow.yaml` - OpenShift deployment with local storage, service-ca TLS, and a commented DRA example
 - `mlflow_v1_mlflow_remote_storage.yaml` - Remote PostgreSQL + S3 storage with horizontal scaling
 - `mlflow_v1_mlflowconfig.yaml` - Namespace-scoped artifact storage override using the upstream `MLflowConfig` CRD
+
+## Development
+
+For API and code-generation changes, use `make generate` and `make manifests`. The Makefile scopes `controller-gen` to the root controller package plus the nested `api/` module so unrelated nested repo copies or temp trees under the workspace do not affect generated output. Keep the Kubernetes dependency versions in the root module and `api/go.mod` aligned so generation runs against the same API types the operator binary uses.
 
 ## Testing
 
@@ -375,7 +401,7 @@ MLflow coverage is split between:
 
 Versioned files such as `test_3_10.py` run only when the applicable version threshold is at least `3.10`. `pre_upgrade` gates on `MLFLOW_TEST_SUPPORTED_VERSION`; `post_upgrade` gates on the pre-upgrade version recorded in the `mlflow-upgrade-test-version` ConfigMap in `upgrade_test_workspace`.
 
-For local runs, `bash mlflow-tests/images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` when needed, uses `upgrade_test_workspace` as the shared namespace and RBAC target for upgrade phases, and requires exactly one artifact backend for `pre_upgrade` or `post_upgrade`. The harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift` only when `route.openshift.io` resources are actually present; otherwise it uses the generic `base` overlay, and you can still override `INFRASTRUCTURE_PLATFORM` explicitly if needed. Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix, while `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path. A missing post-upgrade handoff ConfigMap still means there is no matching versioned dataset for that upgrade source and now exits cleanly as a successful skip, while malformed ConfigMap contents still fail fast. `.github/workflows/upgrade-validation.yml` now runs `current-upgrade-pytest-validation`, which exercises the upgrade-tagged pytest machinery itself on the current build and keeps additive datasets such as `3.11` covered, alongside `seeded-upgrade-state-validation`, which seeds a `3.10.1` deployment, patches the running operator deployment and MLflow CR to the PR-built images, and reuses that upgraded state for `post_upgrade` validation. `.github/workflows/integration-tests.yml` continues to focus on the normal current-version integration matrix.
+For local runs, `bash mlflow-tests/images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` when needed, uses `upgrade_test_workspace` as the shared namespace and RBAC target for upgrade phases, and requires exactly one artifact backend for `pre_upgrade` or `post_upgrade`. The harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift` only when `route.openshift.io` resources are actually present; otherwise it uses the generic `base` overlay, and you can still override `INFRASTRUCTURE_PLATFORM` explicitly if needed. On OpenShift, the harness uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the older localhost port-forward path when needed. Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix, while `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path. A missing post-upgrade handoff ConfigMap still means there is no matching versioned dataset for that upgrade source and now exits cleanly as a successful skip, while malformed ConfigMap contents still fail fast. For normal current-version multi-backend runs, `test-run.sh` now tears down the `MLflow` CR and any self-managed PostgreSQL / SeaweedFS infrastructure between backend suites so later suites do not inherit metadata from earlier ones. `.github/workflows/upgrade-validation.yml` now runs `current-upgrade-pytest-validation`, which exercises the upgrade-tagged pytest machinery itself on the current build and keeps additive datasets such as `3.11` covered, alongside `seeded-upgrade-state-validation`, which seeds a `3.10.1` deployment, patches the running operator deployment and MLflow CR to the PR-built images, and reuses that upgraded state for `post_upgrade` validation. `.github/workflows/integration-tests.yml` continues to focus on the normal current-version integration matrix and now includes a Jenkins-like multi-backend row that runs multiple deployment options in a single `test-run.sh` invocation.
 
 ## Shift-left Upgrade Validation
 
