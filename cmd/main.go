@@ -32,6 +32,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -145,6 +146,9 @@ func main() {
 
 	// Create label selector for MLflow-owned resources
 	labelSelector := labels.SelectorFromSet(labels.Set{"app": "mlflow"})
+	sharedClusterRoleFieldSelector := fields.OneTermEqualSelector("metadata.name", controller.ClusterRoleName)
+	sharedClusterRoleBindingFieldSelector := fields.OneTermEqualSelector(
+		"metadata.name", controller.ClusterRoleBindingName)
 
 	// Check ConsoleLink availability early to configure cache
 	cfg := ctrl.GetConfigOrDie()
@@ -161,8 +165,10 @@ func main() {
 		&corev1.Service{}:               {Label: labelSelector},
 		&corev1.ServiceAccount{}:        {Label: labelSelector},
 		&corev1.PersistentVolumeClaim{}: {Label: labelSelector},
-		&rbacv1.ClusterRole{}:           {Label: labelSelector},
-		&rbacv1.ClusterRoleBinding{}:    {Label: labelSelector},
+		// Use metadata.name field selectors so list/watch authorization stays aligned with
+		// resourceNames-scoped RBAC for the shared server ClusterRole/ClusterRoleBinding.
+		&rbacv1.ClusterRole{}:        {Field: sharedClusterRoleFieldSelector},
+		&rbacv1.ClusterRoleBinding{}: {Field: sharedClusterRoleBindingFieldSelector},
 	}
 
 	// Conditionally add ConsoleLink to cache if available
@@ -233,6 +239,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Keep a dedicated exact-name cache for the singleton GC RBAC objects.
+	// We intentionally avoid widening the main manager cache back to label-scoped RBAC watches
+	// because the operator now relies on tight resourceNames-scoped ClusterRole/ClusterRoleBinding
+	// permissions. Kubernetes only honors those list/watch permissions when the request is restricted
+	// to an exact metadata.name field selector, and the main cache can only express one selector per
+	// GVK. Since the shared server objects are watched as `mlflow`, we need a second cache to watch
+	// the singleton `mlflow-gc` RBAC objects without broadening RBAC.
+	gcRBACWatchCache, err := controller.NewGCRBACWatchCache(cfg, scheme)
+	if err != nil {
+		setupLog.Error(err, "unable to create GC RBAC watch cache")
+		os.Exit(1)
+	}
+	if err := mgr.Add(gcRBACWatchCache); err != nil {
+		setupLog.Error(err, "unable to add GC RBAC watch cache")
+		os.Exit(1)
+	}
+
 	if err := (&controller.MLflowReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
@@ -241,6 +264,7 @@ func main() {
 		ConsoleLinkAvailable:    consoleLinkAvailable,
 		HTTPRouteAvailable:      httpRouteAvailable,
 		ServiceMonitorAvailable: serviceMonitorAvailable,
+		GCRBACWatchCache:        gcRBACWatchCache,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MLflow")
 		os.Exit(1)
