@@ -67,7 +67,6 @@ The framework supports configuration via environment variables:
 | `DISABLE_TLS` | Disable TLS verification | `true` | Both |
 | `artifact_storage` | Artifact storage type (`s3` or `file`) | `file` | Both |
 | `serve_artifacts` | Whether MLflow serves artifacts | `true` | Both |
-| `MLFLOW_BACKEND_STORE_URI` | Database connection URI for store cleanup | `postgresql://postgres:mysecretpassword@localhost:5432/mydatabase` | Both |
 | `MLFLOW_S3_ENDPOINT_URL` | S3 endpoint URL | Optional | Both |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 | Optional | Both |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 | Optional | Both |
@@ -139,14 +138,13 @@ upgrade_test_workspace=mlflow-upgrade-test-workspace \
 uv run pytest tests/upgrade/post_upgrade/test_3_10.py -m post_upgrade
 ```
 
-`bash images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` if it is unset. The test image also bakes the normalized value into `BASH_ENV` so direct image execution paths can rely on the same default without reimplementing the lookup. Harness-driven upgrade runs use `upgrade_test_workspace` for workspace creation and RBAC, default to `ARTIFACT_BACKENDS=file` when no backend is set, and require exactly one backend for `pre_upgrade`, `post_upgrade`, or `SKIP_CLEANUP=true`. For `post_upgrade`, the harness also waits for the MLflow health endpoint and the `MLflow` CR `status.version` to reach the current supported version before pytest starts. A missing `mlflow-upgrade-test-version` ConfigMap still means "no matching post-upgrade dataset for this source version" and now exits cleanly as a successful skip, while a present ConfigMap with empty or invalid handoff data still fails the run.
+`bash images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` if it is unset. The test image also bakes the normalized value into `BASH_ENV` so direct image execution paths can rely on the same default without reimplementing the lookup. Harness-driven upgrade runs use `upgrade_test_workspace` for workspace creation and RBAC, default to `ARTIFACT_BACKENDS=file` when no backend is set, and require exactly one backend for `pre_upgrade`, `post_upgrade`, or `SKIP_CLEANUP=true`. For normal current-version multi-backend runs, the harness now tears down the `MLflow` CR and any self-managed PostgreSQL / SeaweedFS resources between backend suites so later suites start from a clean backend state. For `post_upgrade`, the harness also waits for the MLflow health endpoint and the `MLflow` CR `status.version` to reach the current supported version before pytest starts. A missing `mlflow-upgrade-test-version` ConfigMap still means "no matching post-upgrade dataset for this source version" and now exits cleanly as a successful skip, while a present ConfigMap with empty or invalid handoff data still fails the run.
 
 The upgrade datasets use fixed resource names in a fixed namespace. If a local `pre_upgrade` run is interrupted or you want to reseed from scratch, delete the static namespace and the `mlflow-upgrade-test-version` ConfigMap before rerunning, or use a fresh cluster.
 
 To preserve the seeded deployment for later inspection or reuse:
 
 ```bash
-IN_CLUSTER_MODE=false \
 SKIP_CLEANUP=true \
 upgrade_test_workspace=mlflow-upgrade-test-workspace \
 bash images/test-run.sh -m pre_upgrade
@@ -157,7 +155,6 @@ That leaves the `MLflow` CR, the seeded workspace, and the selected backend reso
 To validate against that preserved deployment:
 
 ```bash
-IN_CLUSTER_MODE=false \
 SKIP_DEPLOYMENT=true \
 upgrade_test_workspace=mlflow-upgrade-test-workspace \
 bash images/test-run.sh -m post_upgrade
