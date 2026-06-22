@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 
 import mlflow
+from mlflow.entities.span import NO_OP_SPAN_TRACE_ID
 from mlflow.exceptions import MlflowException
 
 from ..shared import TestContext
@@ -127,6 +129,82 @@ def action_log_upgrade_text_artifact(test_context: TestContext) -> None:
         with open(target_path, "w", encoding="utf-8") as target:
             target.write(run_payload["artifact_content"])
         mlflow.log_artifact(target_path)
+
+
+def action_create_upgrade_trace(test_context: TestContext) -> None:
+    """Create the current upgrade trace with session metadata."""
+    session_payload = _require_upgrade_payload(test_context, "current_trace_session")
+    trace_payload = _require_upgrade_payload(test_context, "current_trace")
+    if not test_context.active_experiment_id:
+        raise ValueError("active_experiment_id must be set before creating an upgrade trace")
+
+    span = mlflow.start_span_no_context(
+        name=trace_payload["trace_name"],
+        inputs=trace_payload["inputs"],
+        metadata={
+            "mlflow.trace.session": session_payload["session_id"],
+            "mlflow.trace.user": session_payload["user"],
+        },
+        experiment_id=test_context.active_experiment_id,
+    )
+    span.set_outputs(trace_payload["outputs"])
+    trace_id = getattr(span, "request_id", None) or getattr(span, "trace_id", None)
+    if trace_id is None:
+        raise AssertionError(
+            f"Trace '{trace_payload['trace_name']}' did not return a trace/request id"
+        )
+    if trace_id == NO_OP_SPAN_TRACE_ID:
+        raise AssertionError(
+            f"Trace '{trace_payload['trace_name']}' returned a no-op span trace id"
+        )
+    span.end()
+    mlflow.flush_trace_async_logging()
+    test_context.current_trace_id = trace_id
+    test_context.current_trace_name = trace_payload["trace_name"]
+    test_context.upgrade_observed_state.setdefault("trace_ids", {})[trace_payload["trace_name"]] = (
+        trace_id
+    )
+
+
+def action_collect_upgrade_trace_observations(test_context: TestContext) -> None:
+    """Collect persisted trace data for the active upgrade case."""
+    case = _require_upgrade_payload(test_context, "case")
+    experiment = mlflow.get_experiment_by_name(case["experiment_name"])
+    if experiment is None:
+        raise ValueError(f"Experiment '{case['experiment_name']}' not found")
+
+    expected_traces_by_session = {
+        session_payload["session_id"]: {
+            trace_payload["trace_name"] for trace_payload in session_payload["traces"]
+        }
+        for session_payload in case["sessions"]
+    }
+
+    observed_by_session = {}
+    for attempt in range(5):
+        traces = test_context.user_client.search_traces(
+            experiment_ids=[experiment.experiment_id],
+            max_results=100,
+        )
+
+        observed_by_session = {}
+        for trace in traces:
+            metadata = trace.info.trace_metadata or {}
+            session_id = metadata.get("mlflow.trace.session")
+            if not session_id or not trace.data.spans:
+                continue
+            root_span = trace.data.spans[0]
+            observed_by_session.setdefault(session_id, {})[root_span.name] = trace
+
+        if all(
+            expected_trace_names.issubset(set(observed_by_session.get(session_id, {})))
+            for session_id, expected_trace_names in expected_traces_by_session.items()
+        ):
+            break
+        if attempt < 4:
+            time.sleep(1)
+
+    test_context.upgrade_observed_state["traces_by_session"] = observed_by_session
 
 
 def action_ensure_upgrade_registered_model(test_context: TestContext) -> None:

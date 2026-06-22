@@ -71,6 +71,32 @@ def validate_upgrade_experiment_runs(test_context: TestContext) -> None:
         )
 
 
+def validate_upgrade_trace_sessions(test_context: TestContext) -> None:
+    """Validate the upgrade trace/session scenario."""
+    case = _require_case_payload(test_context, "case")
+    traces_by_session = test_context.upgrade_observed_state.get("traces_by_session", {})
+
+    for session_payload in case["sessions"]:
+        session_traces = traces_by_session.get(session_payload["session_id"], {})
+        assert len(session_traces) >= len(session_payload["traces"]), (
+            f"Expected at least {len(session_payload['traces'])} traces for session "
+            f"'{session_payload['session_id']}', found {len(session_traces)}"
+        )
+        for trace_payload in session_payload["traces"]:
+            trace = session_traces.get(trace_payload["trace_name"])
+            assert trace is not None, (
+                f"Trace '{trace_payload['trace_name']}' missing from session "
+                f"'{session_payload['session_id']}'"
+            )
+            metadata = trace.info.trace_metadata or {}
+            assert metadata.get("mlflow.trace.session") == session_payload["session_id"]
+            assert metadata.get("mlflow.trace.user") == session_payload["user"]
+
+            root_span = trace.data.spans[0]
+            assert root_span.inputs.get("message") == trace_payload["inputs"]["message"]
+            assert root_span.outputs.get("result") == trace_payload["outputs"]["result"]
+
+
 def validate_upgrade_registered_models(test_context: TestContext) -> None:
     """Validate the upgrade registered-model/model-version scenario."""
     case = _require_case_payload(test_context, "case")

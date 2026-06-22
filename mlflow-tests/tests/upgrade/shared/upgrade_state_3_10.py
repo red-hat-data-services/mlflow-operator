@@ -36,6 +36,54 @@ EXPERIMENT_RUNS_STATE = {
     ],
 }
 
+TRACE_STATE = {
+    "experiment_name": "upgrade-exp-static-traces",
+    "sessions": [
+        {
+            "session_id": "upgrade-session-1",
+            "user": "upgrade-user-1",
+            "traces": [
+                {
+                    "trace_name": "upgrade-trace-1-1",
+                    "inputs": {"message": "trace session 1 message 1"},
+                    "outputs": {"result": "trace session 1 result 1"},
+                },
+                {
+                    "trace_name": "upgrade-trace-1-2",
+                    "inputs": {"message": "trace session 1 message 2"},
+                    "outputs": {"result": "trace session 1 result 2"},
+                },
+                {
+                    "trace_name": "upgrade-trace-1-3",
+                    "inputs": {"message": "trace session 1 message 3"},
+                    "outputs": {"result": "trace session 1 result 3"},
+                },
+            ],
+        },
+        {
+            "session_id": "upgrade-session-2",
+            "user": "upgrade-user-2",
+            "traces": [
+                {
+                    "trace_name": "upgrade-trace-2-1",
+                    "inputs": {"message": "trace session 2 message 1"},
+                    "outputs": {"result": "trace session 2 result 1"},
+                },
+                {
+                    "trace_name": "upgrade-trace-2-2",
+                    "inputs": {"message": "trace session 2 message 2"},
+                    "outputs": {"result": "trace session 2 result 2"},
+                },
+                {
+                    "trace_name": "upgrade-trace-2-3",
+                    "inputs": {"message": "trace session 2 message 3"},
+                    "outputs": {"result": "trace session 2 result 3"},
+                },
+            ],
+        },
+    ],
+}
+
 REGISTERED_MODELS_STATE = {
     "experiment_name": "upgrade-exp-static-models",
     "models": [

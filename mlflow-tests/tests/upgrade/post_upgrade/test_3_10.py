@@ -6,12 +6,14 @@ import pytest
 
 from ..actions import (
     make_upgrade_state_action,
+    action_collect_upgrade_trace_observations,
     action_read_pre_upgrade_version_configmap,
 )
 from ...shared import TestData, TestStep
 from ..shared.upgrade_state_3_10 import (
     EXPERIMENT_RUNS_STATE,
     REGISTERED_MODELS_STATE,
+    TRACE_STATE,
 )
 from ..phase_base import UpgradePhaseBase
 from ..utils import get_upgrade_test_workspace
@@ -19,6 +21,7 @@ from ..validations import (
     validate_pre_upgrade_version_configmap,
     validate_upgrade_experiment_runs,
     validate_upgrade_registered_models,
+    validate_upgrade_trace_sessions,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,26 @@ class TestMLflow310PostUpgrade(UpgradePhaseBase):
                     validate_func=validate_pre_upgrade_version_configmap,
                 ),
                 TestStep(validate_func=validate_upgrade_experiment_runs),
+            ],
+        ),
+        TestData(
+            test_name="Validate static trace sessions",
+            workspace_to_use=UPGRADE_TEST_WORKSPACE,
+            test_steps=[
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_trace_state",
+                        case=TRACE_STATE,
+                    )
+                ),
+                TestStep(
+                    action_func=action_read_pre_upgrade_version_configmap,
+                    validate_func=validate_pre_upgrade_version_configmap,
+                ),
+                TestStep(
+                    action_func=action_collect_upgrade_trace_observations,
+                    validate_func=validate_upgrade_trace_sessions,
+                ),
             ],
         ),
         TestData(

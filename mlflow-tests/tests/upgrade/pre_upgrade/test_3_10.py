@@ -6,12 +6,14 @@ import pytest
 
 from ..actions import (
     make_upgrade_state_action,
+    action_collect_upgrade_trace_observations,
     action_write_pre_upgrade_version_configmap,
     action_ensure_upgrade_experiment,
     action_start_upgrade_run,
     action_log_upgrade_run_params,
     action_log_upgrade_run_metrics,
     action_log_upgrade_text_artifact,
+    action_create_upgrade_trace,
     action_ensure_upgrade_registered_model,
     action_create_upgrade_model_version,
 )
@@ -20,6 +22,7 @@ from ...shared import TestData, TestStep
 from ..shared.upgrade_state_3_10 import (
     EXPERIMENT_RUNS_STATE,
     REGISTERED_MODELS_STATE,
+    TRACE_STATE,
 )
 from ..phase_base import UpgradePhaseBase
 from ..utils import get_upgrade_test_workspace
@@ -27,6 +30,7 @@ from ..validations import (
     validate_pre_upgrade_version_configmap,
     validate_upgrade_experiment_runs,
     validate_upgrade_registered_models,
+    validate_upgrade_trace_sessions,
 )
 from ...validations import validate_run_created, validate_run_ended
 
@@ -76,6 +80,76 @@ class TestMLflow310PreUpgrade(UpgradePhaseBase):
                 TestStep(action_func=action_log_upgrade_text_artifact),
                 TestStep(action_func=action_end_run, validate_func=validate_run_ended),
                 TestStep(validate_func=validate_upgrade_experiment_runs),
+            ],
+        ),
+        TestData(
+            test_name="Seed static trace sessions",
+            workspace_to_use=UPGRADE_TEST_WORKSPACE,
+            test_steps=[
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_trace_state",
+                        case=TRACE_STATE,
+                        current_experiment=TRACE_STATE,
+                    )
+                ),
+                TestStep(
+                    action_func=action_write_pre_upgrade_version_configmap,
+                    validate_func=validate_pre_upgrade_version_configmap,
+                ),
+                TestStep(action_func=action_ensure_upgrade_experiment),
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_upgrade_trace_1_1",
+                        current_trace_session=TRACE_STATE["sessions"][0],
+                        current_trace=TRACE_STATE["sessions"][0]["traces"][0],
+                    )
+                ),
+                TestStep(action_func=action_create_upgrade_trace),
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_upgrade_trace_1_2",
+                        current_trace_session=TRACE_STATE["sessions"][0],
+                        current_trace=TRACE_STATE["sessions"][0]["traces"][1],
+                    )
+                ),
+                TestStep(action_func=action_create_upgrade_trace),
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_upgrade_trace_1_3",
+                        current_trace_session=TRACE_STATE["sessions"][0],
+                        current_trace=TRACE_STATE["sessions"][0]["traces"][2],
+                    )
+                ),
+                TestStep(action_func=action_create_upgrade_trace),
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_upgrade_trace_2_1",
+                        current_trace_session=TRACE_STATE["sessions"][1],
+                        current_trace=TRACE_STATE["sessions"][1]["traces"][0],
+                    )
+                ),
+                TestStep(action_func=action_create_upgrade_trace),
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_upgrade_trace_2_2",
+                        current_trace_session=TRACE_STATE["sessions"][1],
+                        current_trace=TRACE_STATE["sessions"][1]["traces"][1],
+                    )
+                ),
+                TestStep(action_func=action_create_upgrade_trace),
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_upgrade_trace_2_3",
+                        current_trace_session=TRACE_STATE["sessions"][1],
+                        current_trace=TRACE_STATE["sessions"][1]["traces"][2],
+                    )
+                ),
+                TestStep(action_func=action_create_upgrade_trace),
+                TestStep(
+                    action_func=action_collect_upgrade_trace_observations,
+                    validate_func=validate_upgrade_trace_sessions,
+                ),
             ],
         ),
         TestData(
