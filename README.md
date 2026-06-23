@@ -362,6 +362,11 @@ requires exactly one artifact backend for upgrade phases, and skips waiting on
 `status.version` because `rhoai-3.4` does not publish that field during this
 test flow.
 
+Reused post-upgrade resources remain preserved by default, but
+`CLEANUP_REUSED_RESOURCES=on_success` now lets callers keep failed runs for
+debugging while still cleaning up successful validation runs when
+`SKIP_CLEANUP=false`.
+
 For normal current-version multi-backend runs, `test-run.sh` now tears down the
 `MLflow` CR and any self-managed PostgreSQL or SeaweedFS infrastructure between
 backend suites so later suites do not inherit metadata from earlier ones.
