@@ -31,7 +31,7 @@ RUN SUPPORTED_MLFLOW_VERSION="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE="${SUPPORTED_M
       CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GO111MODULE=on \
         GOEXPERIMENT=strictfipsruntime go build -ldflags "${GO_LDFLAGS}" -tags strictfipsruntime -a -o manager cmd/main.go
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:1bc3c5c15720506a0cf48adfdf8b623dfe704377e007d7bbae8d14876392ca6a
+FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:850143255ee0d1915f09aaa09f6ed31f24086ba605c323badfbefa95b8c52b0e
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/charts/mlflow charts/mlflow
