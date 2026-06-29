@@ -21,10 +21,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
@@ -121,73 +119,6 @@ var _ = Describe("MLflow Controller", func() {
 			Expect(mlflow.Status.URL).To(BeEmpty())
 			Expect(mlflow.Status.Address).NotTo(BeNil())
 			Expect(mlflow.Status.Address.URL).To(Equal("https://mlflow.opendatahub.svc:8443"))
-		})
-
-		It("should delete GC CronJob when garbageCollection is removed from spec", func() {
-			By("Enabling garbage collection")
-			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
-			mlflow.Spec.GarbageCollection = &mlflowv1.GarbageCollectionSpec{
-				Schedule: "0 2 * * 0",
-			}
-			Expect(k8sClient.Update(ctx, mlflow)).To(Succeed())
-
-			controllerReconciler := &MLflowReconciler{
-				Client:               k8sClient,
-				Scheme:               k8sClient.Scheme(),
-				Namespace:            "opendatahub",
-				ChartPath:            "../../charts/mlflow",
-				ConsoleLinkAvailable: false,
-				HTTPRouteAvailable:   false,
-				GCRBACWatchCache:     mustNewGCRBACWatchCache(),
-			}
-
-			By("Reconciling to create the CronJob")
-			_, reconcileErr := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(reconcileErr).NotTo(HaveOccurred())
-
-			gcCronJob := &batchv1.CronJob{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name:      "mlflow-gc",
-				Namespace: "opendatahub",
-			}, gcCronJob)).To(Succeed())
-
-			By("Disabling garbage collection")
-			Expect(k8sClient.Get(ctx, typeNamespacedName, mlflow)).To(Succeed())
-			mlflow.Spec.GarbageCollection = nil
-			Expect(k8sClient.Update(ctx, mlflow)).To(Succeed())
-
-			By("Reconciling to delete the CronJob")
-			_, reconcileErr = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(reconcileErr).NotTo(HaveOccurred())
-
-			err := k8sClient.Get(ctx, types.NamespacedName{
-				Name:      "mlflow-gc",
-				Namespace: "opendatahub",
-			}, gcCronJob)
-			Expect(errors.IsNotFound(err)).To(BeTrue())
-
-			gcServiceAccount := &corev1.ServiceAccount{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      GCServiceAccountName,
-				Namespace: "opendatahub",
-			}, gcServiceAccount)
-			Expect(errors.IsNotFound(err)).To(BeTrue())
-
-			gcClusterRoleBinding := &rbacv1.ClusterRoleBinding{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name: "mlflow-gc",
-			}, gcClusterRoleBinding)
-			Expect(errors.IsNotFound(err)).To(BeTrue())
-
-			gcClusterRole := &rbacv1.ClusterRole{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name: "mlflow-gc",
-			}, gcClusterRole)
-			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 
 		It("should create an HTTPRoute with v1 rewrite when available", func() {

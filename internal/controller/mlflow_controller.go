@@ -24,7 +24,6 @@ import (
 	consolev1 "github.com/openshift/api/console/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -117,35 +116,6 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Handle deletion - all resources are cleaned up via owner references
 	if mlflow.GetDeletionTimestamp() != nil {
 		return ctrl.Result{}, nil
-	}
-
-	// Clean up GC resources when garbage collection is disabled.
-	if mlflow.Spec.GarbageCollection == nil {
-		gcSuffix := "-gc" + getResourceSuffix(mlflow.Name)
-		gcResources := []struct {
-			obj  client.Object
-			kind string
-			name string
-			ns   string
-		}{
-			{&batchv1.CronJob{}, "CronJob", ResourceName + gcSuffix, targetNamespace},
-			{&corev1.ServiceAccount{}, "ServiceAccount", GCServiceAccountName, targetNamespace},
-			{&rbacv1.ClusterRoleBinding{}, "ClusterRoleBinding", ResourceName + gcSuffix, ""},
-			{&rbacv1.ClusterRole{}, "ClusterRole", ResourceName + gcSuffix, ""},
-		}
-		for _, res := range gcResources {
-			existing := res.obj.DeepCopyObject().(client.Object)
-			existing.SetName(res.name)
-			existing.SetNamespace(res.ns)
-			if err := r.Delete(ctx, existing); err != nil {
-				if errors.IsNotFound(err) {
-					continue
-				}
-				log.Error(err, "Failed to delete GC resource", "kind", res.kind, "name", res.name)
-				return ctrl.Result{}, err
-			}
-			log.Info("Deleted GC resource", "kind", res.kind, "name", res.name)
-		}
 	}
 	// Validate user-provided CA bundle ConfigMap if specified
 	if mlflow.Spec.CABundleConfigMap != nil {
