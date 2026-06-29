@@ -25,9 +25,9 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: mlflow{{ .Values.resourceSuffix }}
+  name: mlflow
   labels:
-    app: mlflow{{ .Values.resourceSuffix }}
+    app: mlflow
     {{- with .Values.commonLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

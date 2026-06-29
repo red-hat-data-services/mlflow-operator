@@ -32,6 +32,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -145,6 +146,9 @@ func main() {
 
 	// Create label selector for MLflow-owned resources
 	labelSelector := labels.SelectorFromSet(labels.Set{"app": "mlflow"})
+	sharedClusterRoleFieldSelector := fields.OneTermEqualSelector("metadata.name", controller.ClusterRoleName)
+	sharedClusterRoleBindingFieldSelector := fields.OneTermEqualSelector(
+		"metadata.name", controller.ClusterRoleBindingName)
 
 	// Check ConsoleLink availability early to configure cache
 	cfg := ctrl.GetConfigOrDie()
@@ -161,8 +165,10 @@ func main() {
 		&corev1.Service{}:               {Label: labelSelector},
 		&corev1.ServiceAccount{}:        {Label: labelSelector},
 		&corev1.PersistentVolumeClaim{}: {Label: labelSelector},
-		&rbacv1.ClusterRole{}:           {Label: labelSelector},
-		&rbacv1.ClusterRoleBinding{}:    {Label: labelSelector},
+		// Use metadata.name field selectors so list/watch authorization stays aligned with
+		// resourceNames-scoped RBAC for the shared server ClusterRole/ClusterRoleBinding.
+		&rbacv1.ClusterRole{}:        {Field: sharedClusterRoleFieldSelector},
+		&rbacv1.ClusterRoleBinding{}: {Field: sharedClusterRoleBindingFieldSelector},
 	}
 
 	// Conditionally add ConsoleLink to cache if available
