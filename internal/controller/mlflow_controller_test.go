@@ -107,7 +107,6 @@ var _ = Describe("MLflow Controller", func() {
 				ChartPath:            "../../charts/mlflow",
 				ConsoleLinkAvailable: false,
 				HTTPRouteAvailable:   false,
-				GCRBACWatchCache:     mustNewGCRBACWatchCache(),
 			}
 
 			_, reconcileErr := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -121,7 +120,7 @@ var _ = Describe("MLflow Controller", func() {
 			Expect(mlflow.Status.Address.URL).To(Equal("https://mlflow.opendatahub.svc:8443"))
 		})
 
-		It("should create an HTTPRoute with v1 rewrite when available", func() {
+		It("should create an HTTPRoute with API rewrite when available", func() {
 			By("Reconciling the created resource with HTTPRoute enabled")
 
 			controllerReconciler := &MLflowReconciler{
@@ -131,7 +130,6 @@ var _ = Describe("MLflow Controller", func() {
 				ChartPath:            "../../charts/mlflow",
 				ConsoleLinkAvailable: false,
 				HTTPRouteAvailable:   true,
-				GCRBACWatchCache:     mustNewGCRBACWatchCache(),
 			}
 
 			_, reconcileErr := controllerReconciler.Reconcile(ctx, reconcile.Request{

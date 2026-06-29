@@ -239,23 +239,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Keep a dedicated exact-name cache for the singleton GC RBAC objects.
-	// We intentionally avoid widening the main manager cache back to label-scoped RBAC watches
-	// because the operator now relies on tight resourceNames-scoped ClusterRole/ClusterRoleBinding
-	// permissions. Kubernetes only honors those list/watch permissions when the request is restricted
-	// to an exact metadata.name field selector, and the main cache can only express one selector per
-	// GVK. Since the shared server objects are watched as `mlflow`, we need a second cache to watch
-	// the singleton `mlflow-gc` RBAC objects without broadening RBAC.
-	gcRBACWatchCache, err := controller.NewGCRBACWatchCache(cfg, scheme)
-	if err != nil {
-		setupLog.Error(err, "unable to create GC RBAC watch cache")
-		os.Exit(1)
-	}
-	if err := mgr.Add(gcRBACWatchCache); err != nil {
-		setupLog.Error(err, "unable to add GC RBAC watch cache")
-		os.Exit(1)
-	}
-
 	if err := (&controller.MLflowReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
@@ -264,7 +247,6 @@ func main() {
 		ConsoleLinkAvailable:    consoleLinkAvailable,
 		HTTPRouteAvailable:      httpRouteAvailable,
 		ServiceMonitorAvailable: serviceMonitorAvailable,
-		GCRBACWatchCache:        gcRBACWatchCache,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MLflow")
 		os.Exit(1)

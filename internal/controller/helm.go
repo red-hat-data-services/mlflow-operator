@@ -63,7 +63,7 @@ const (
 // getResourceSuffix returns the suffix used by most per-instance MLflow resources.
 // Returns empty string for CR named "mlflow", otherwise returns "-{crname}".
 // Shared server RBAC objects keep static names, while most namespaced resources
-// and GC RBAC objects are named as "mlflow{{ suffix }}".
+// are named as "mlflow{{ suffix }}".
 func getResourceSuffix(mlflowName string) string {
 	if mlflowName == ResourceName {
 		return ""
@@ -156,8 +156,8 @@ func (h *HelmRenderer) mlflowToHelmValues(mlflow *mlflowv1.MLflow, namespace str
 	values["namespace"] = namespace
 
 	// Resource suffix for unique naming - empty string for singleton "mlflow" CR, "-<name>" for others.
-	// Shared server RBAC objects keep static names, while most namespaced resources and GC RBAC
-	// objects still use "mlflow{{ .Values.resourceSuffix }}".
+	// Shared server RBAC objects keep static names, while most namespaced resources still use
+	// "mlflow{{ .Values.resourceSuffix }}".
 	values["resourceSuffix"] = getResourceSuffix(mlflow.Name)
 
 	values["commonLabels"] = map[string]interface{}{

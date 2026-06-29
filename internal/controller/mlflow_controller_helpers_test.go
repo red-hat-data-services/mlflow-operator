@@ -54,17 +54,6 @@ func TestIsSharedRBACObject(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "gc cluster role is not shared",
-			obj: &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": "rbac.authorization.k8s.io/v1",
-				"kind":       "ClusterRole",
-				"metadata": map[string]interface{}{
-					"name": "mlflow-gc",
-				},
-			}},
-			want: false,
-		},
-		{
 			name: "namespaced role is not shared",
 			obj: &unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": "rbac.authorization.k8s.io/v1",
@@ -125,18 +114,5 @@ func TestSharedRBACObjectToMLflowRequests(t *testing.T) {
 	ignored := sharedRBACObjectToMLflowRequests(obj, ClusterRoleName+"-other")
 	if len(ignored) != 0 {
 		t.Fatalf("sharedRBACObjectToMLflowRequests() with mismatched name = %#v, want no requests", ignored)
-	}
-
-	gcObj := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "rbac.authorization.k8s.io/v1",
-		"kind":       "ClusterRole",
-		"metadata": map[string]interface{}{
-			"name": GCClusterRBACName,
-		},
-	}}
-	gcObj.SetOwnerReferences(ownerRefs[:1])
-	gcRequests := sharedRBACObjectToMLflowRequests(gcObj, GCClusterRBACName)
-	if len(gcRequests) != 1 || gcRequests[0].Name != "mlflow-a" {
-		t.Fatalf("sharedRBACObjectToMLflowRequests() for GC = %#v, want single request for mlflow-a", gcRequests)
 	}
 }

@@ -171,13 +171,11 @@ The deployment always sets `MLFLOW_DISABLE_TELEMETRY=true` and `MLFLOW_SERVER_EN
 
 TLS is terminated inside the MLflow container using uvicorn options. Certificates come from the `mlflow-tls` secret, which is created automatically on OpenShift via the `service.beta.openshift.io/serving-cert-secret-name` annotation. If you need to provide your own certificates, place `tls.crt` and `tls.key` in a secret named `mlflow-tls` (or override `tls.secretName` in Helm values). On OpenShift, the operator sets `UVICORN_SSL_CIPHERS=PROFILE=SYSTEM` by default unless `spec.env` already defines that variable, so uvicorn follows the platform crypto policy, including FIPS-compatible TLS 1.2 and 1.3 cipher selection.
 
-When garbage collection is enabled, the CronJob runs under a separate `mlflow-gc-sa` ServiceAccount with its own suffixed `mlflow-gc{{ resourceSuffix }}` ClusterRole and ClusterRoleBinding. The retained `experiments/update` permission is only needed when artifact deletion still goes through the MLflow artifact proxy; metadata cleanup itself uses the backend store directly.
-
 ### Operator RBAC Privileges
 
 The operator requires two levels of RBAC permissions:
 
-- **Cluster-scoped** (`config/rbac/role.yaml`): Manages the MLflow custom resource lifecycle, enumerates namespaces, reads and watches the well-known artifact storage secret, watches MLflowConfig overrides, manages the shared `mlflow` ClusterRole/ClusterRoleBinding plus the currently effective singleton `mlflow-gc` RBAC names, and handles OpenShift console links and Gateway API routes.
+- **Cluster-scoped** (`config/rbac/role.yaml`): Manages the MLflow custom resource lifecycle, enumerates namespaces, reads and watches the well-known artifact storage secret, watches MLflowConfig overrides, manages the shared `mlflow` ClusterRole and ClusterRoleBinding, and handles OpenShift console links and Gateway API routes.
 - **Namespace-scoped** (`config/rbac/namespace_role.yaml`): Manages deployment resources (ConfigMaps, Secrets, ServiceAccounts, Services, PVCs, Deployments, NetworkPolicies, ServiceMonitors) within the target namespace.
 
 The operator also creates shared `mlflow` ClusterRole and ClusterRoleBinding objects for the MLflow server pod itself, granting read-only cluster-wide access to namespaces, the well-known `mlflow-artifact-connection` secret, and MLflowConfig CRs. Secret access includes watch-based reads so namespace-specific artifact override updates can be observed across workspaces. These cannot be scoped to a single namespace because MLflow serves requests across namespaces.

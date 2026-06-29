@@ -30,21 +30,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	controllerbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
-	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	mlflowv1 "github.com/opendatahub-io/mlflow-operator/api/v1"
@@ -64,7 +60,6 @@ type MLflowReconciler struct {
 	ConsoleLinkAvailable    bool
 	HTTPRouteAvailable      bool
 	ServiceMonitorAvailable bool
-	GCRBACWatchCache        crcache.Cache
 }
 
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows,verbs=get;list;watch;create;update;patch;delete
@@ -79,11 +74,6 @@ type MLflowReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=mlflow,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,resourceNames=mlflow,verbs=get;list;watch;update;patch;delete
-// GC RBAC objects still use the chart suffix, but under the current singleton-only operator model
-// the effective names remain `mlflow-gc`. Revisit these resourceNames when multi-instance support
-// is added or when `mlflow gc` stops relying on artifact-proxy authorization.
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=mlflow-gc,verbs=list;watch;update;patch;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,resourceNames=mlflow-gc,verbs=list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=console.openshift.io,resources=consolelinks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 //
@@ -388,10 +378,6 @@ func (r *MLflowReconciler) applyObject(ctx context.Context, obj client.Object) e
 func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	log := ctrl.Log.WithName("setup")
 
-	if r.GCRBACWatchCache == nil {
-		return fmt.Errorf("GCRBACWatchCache must be configured")
-	}
-
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&mlflowv1.MLflow{}).
 		Owns(&appsv1.Deployment{}).
@@ -414,30 +400,6 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			controllerbuilder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 				return obj.GetName() == PlatformTrustedCABundleConfigMapName
 			})),
-		)
-
-	// Use a separate raw source for `mlflow-gc` RBAC watches instead of widening the main cache.
-	// This is a workaround for two Kubernetes/controller-runtime constraints:
-	// 1. tight resourceNames-scoped RBAC for list/watch only works when the watch is restricted to
-	//    an exact metadata.name field selector; and
-	// 2. the main cache can only carry one selector per GVK, which is already used for the shared
-	//    `mlflow` ClusterRole/ClusterRoleBinding objects.
-	// The dedicated cache lets us watch the singleton `mlflow-gc` objects too without reopening
-	// broad label-scoped RBAC on all ClusterRoles/ClusterRoleBindings.
-	builder = builder.
-		WatchesRawSource(
-			source.Kind(
-				r.GCRBACWatchCache,
-				&rbacv1.ClusterRole{},
-				handler.TypedEnqueueRequestsFromMapFunc(r.gcClusterRoleToMLflowRequests),
-			),
-		).
-		WatchesRawSource(
-			source.Kind(
-				r.GCRBACWatchCache,
-				&rbacv1.ClusterRoleBinding{},
-				handler.TypedEnqueueRequestsFromMapFunc(r.gcClusterRoleBindingToMLflowRequests),
-			),
 		)
 
 	// Conditionally watch ConsoleLink if available in the cluster
@@ -500,16 +462,6 @@ func (r *MLflowReconciler) sharedClusterRoleToMLflowRequests(ctx context.Context
 // sharedClusterRoleBindingToMLflowRequests maps the shared ClusterRoleBinding to MLflow reconcile requests.
 func (r *MLflowReconciler) sharedClusterRoleBindingToMLflowRequests(ctx context.Context, obj client.Object) []reconcile.Request {
 	return sharedRBACObjectToMLflowRequests(obj, ClusterRoleBindingName)
-}
-
-// gcClusterRoleToMLflowRequests maps the singleton GC ClusterRole to MLflow reconcile requests.
-func (r *MLflowReconciler) gcClusterRoleToMLflowRequests(ctx context.Context, obj *rbacv1.ClusterRole) []reconcile.Request {
-	return sharedRBACObjectToMLflowRequests(obj, GCClusterRBACName)
-}
-
-// gcClusterRoleBindingToMLflowRequests maps the singleton GC ClusterRoleBinding to MLflow reconcile requests.
-func (r *MLflowReconciler) gcClusterRoleBindingToMLflowRequests(ctx context.Context, obj *rbacv1.ClusterRoleBinding) []reconcile.Request {
-	return sharedRBACObjectToMLflowRequests(obj, GCClusterRBACName)
 }
 
 // configMapToMLflowRequests maps ConfigMap events to MLflow reconcile requests.
@@ -630,15 +582,4 @@ func isSharedRBACObject(obj client.Object) bool {
 	default:
 		return false
 	}
-}
-
-func NewGCRBACWatchCache(cfg *rest.Config, scheme *runtime.Scheme) (crcache.Cache, error) {
-	gcClusterRBACFieldSelector := fields.OneTermEqualSelector("metadata.name", GCClusterRBACName)
-	return crcache.New(cfg, crcache.Options{
-		Scheme: scheme,
-		ByObject: map[client.Object]crcache.ByObject{
-			&rbacv1.ClusterRole{}:        {Field: gcClusterRBACFieldSelector},
-			&rbacv1.ClusterRoleBinding{}: {Field: gcClusterRBACFieldSelector},
-		},
-	})
 }

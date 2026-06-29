@@ -23,8 +23,6 @@ const (
 	ClusterRoleName = "mlflow"
 	// ClusterRoleBindingName is the name of the shared ClusterRoleBinding used by all MLflow instances
 	ClusterRoleBindingName = "mlflow"
-	// GCClusterRBACName is the currently effective singleton GC ClusterRole/ClusterRoleBinding name.
-	GCClusterRBACName = "mlflow-gc"
 	// ServiceAccountName is the name of the service account for MLflow deployments
 	ServiceAccountName = "mlflow-sa"
 	// TLSSecretName is the default name for the TLS secret used by the MLflow server
