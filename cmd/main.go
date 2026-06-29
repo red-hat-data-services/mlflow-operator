@@ -57,6 +57,8 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+const defaultNamespace = "opendatahub"
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(mlflowv1.AddToScheme(scheme))
@@ -64,6 +66,13 @@ func init() {
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1.Install(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+func inferPodNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return defaultNamespace
 }
 
 // nolint:gocyclo
@@ -78,7 +87,8 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.StringVar(&namespace, "namespace", "opendatahub", "Target namespace for MLflow resources.")
+	flag.StringVar(&namespace, "namespace", inferPodNamespace(),
+		"Target namespace for MLflow resources. Defaults to the pod's own namespace when running in-cluster.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
