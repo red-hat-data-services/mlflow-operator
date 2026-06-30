@@ -274,7 +274,8 @@ jobs:
             -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
             -e DEPLOY_MLFLOW_OPERATOR=false \
             -e SKIP_DEPLOYMENT=true \
-            -e SKIP_CLEANUP=true \
+            -e SKIP_CLEANUP=false \
+            -e CLEANUP_REUSED_RESOURCES=on_success \
             -e NAMESPACE="${{ env.NAMESPACE }}" \
             -e MLFLOW_OPERATOR_IMAGE="${{ env.OPERATOR_RUNTIME_IMAGE }}" \
             -e MLFLOW_IMAGE="${{ env.MLFLOW_RUNTIME_IMAGE }}" \
@@ -608,12 +609,6 @@ jobs:
           docker load -i "runtime-image/${{ env.MLFLOW_RUNTIME_ARTIFACT }}.tar"
           kind load docker-image "${{ env.MLFLOW_RUNTIME_IMAGE }}" --name ${{ env.UPGRADE_CLUSTER_NAME }}
 
-      - name: Point operator defaults at the built MLflow image
-        shell: bash
-        run: |
-          sed -i "s#^MLFLOW_IMAGE=.*#MLFLOW_IMAGE=${{ env.MLFLOW_RUNTIME_IMAGE }}#" config/overlays/kind/params.env
-          grep "^MLFLOW_IMAGE=" config/overlays/kind/params.env
-
       - name: Build MLflow 3.10.1-compatible seed operator image
         env:
           SEED_OPERATOR_IMG: "localhost/mlflow-operator-upgrade-seed:v0.0.1"
@@ -665,6 +660,8 @@ jobs:
 
       - name: Run upgrade e2e tests
         run: make test-e2e-upgrade E2E_IMG=${{ env.UPGRADE_OPERATOR_IMAGE }} MLFLOW_SEED_IMAGE=${{ env.MLFLOW_SEED_IMAGE }}
+        env:
+          MLFLOW_RUNTIME_IMAGE: ${{ env.MLFLOW_RUNTIME_IMAGE }}
 
       - name: Collect upgrade debug logs
         if: ${{ failure() && !cancelled() }}

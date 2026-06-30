@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	modulev1alpha1 "github.com/opendatahub-io/mlflow-operator/api/mlflowoperator/v1alpha1"
 	mlflowv1 "github.com/opendatahub-io/mlflow-operator/api/v1"
 	"github.com/opendatahub-io/mlflow-operator/internal/config"
 )
@@ -68,6 +69,7 @@ type MLflowReconciler struct {
 	GCRBACWatchCache        crcache.Cache
 }
 
+// +kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows/finalizers,verbs=update
@@ -109,15 +111,26 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	// Use configured target namespace
-	targetNamespace := r.Namespace
-	cfg := config.GetConfig()
-	mlflow.Status.Address = buildStatusAddress(mlflow.Name, targetNamespace)
+	cfg, err := r.resolveOperatorConfig(ctx)
+	if err != nil {
+		log.Error(err, "Failed to resolve operator configuration")
+		return ctrl.Result{}, err
+	}
 
 	// Handle deletion - all resources are cleaned up via owner references
 	if mlflow.GetDeletionTimestamp() != nil {
 		return ctrl.Result{}, nil
 	}
+
+	if result, handled, err := r.ensureMLflowOperatorReady(ctx, mlflow, cfg); err != nil {
+		log.Error(err, "MLflowOperator dependency check failed")
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
+	}
+
+	targetNamespace := cfg.ApplicationsNamespace
+	mlflow.Status.Address = buildStatusAddress(mlflow.Name, targetNamespace)
 
 	// Clean up GC resources when garbage collection is disabled.
 	if mlflow.Spec.GarbageCollection == nil {
@@ -219,7 +232,7 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		IsOpenShift:             r.ConsoleLinkAvailable,
 		ServiceMonitorAvailable: r.ServiceMonitorAvailable,
 	}
-	objects, err := renderer.RenderChart(mlflow, targetNamespace, renderOpts)
+	objects, err := renderer.RenderChart(mlflow, targetNamespace, renderOpts, cfg)
 	if err != nil {
 		log.Error(err, "Failed to render Helm chart")
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
@@ -271,7 +284,7 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Reconcile ConsoleLink (if available in cluster)
-	if err := r.reconcileConsoleLink(ctx, mlflow); err != nil {
+	if err := r.reconcileConsoleLink(ctx, mlflow, cfg); err != nil {
 		log.Error(err, "Failed to reconcile ConsoleLink")
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
 			Type:    "Available",
@@ -286,7 +299,7 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Reconcile HttpRoute
-	if err := r.reconcileHttpRoute(ctx, mlflow, targetNamespace); err != nil {
+	if err := r.reconcileHttpRoute(ctx, mlflow, targetNamespace, cfg); err != nil {
 		setObservedURLs(mlflow, targetNamespace, false, cfg)
 		log.Error(err, "Failed to reconcile HttpRoute")
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
@@ -410,7 +423,7 @@ func (r *MLflowReconciler) applyObject(ctx context.Context, obj client.Object) e
 
 	// Use Server-Side Apply - the API server handles all the merge logic
 	// This avoids unnecessary updates when only metadata changes
-	err := r.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner("mlflow-operator"))
+	err := r.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner("mlflow-operator")) //nolint:staticcheck // pre-existing, tracked separately
 	if err != nil {
 		log.Error(err, "Failed to apply object", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName(), "namespace", obj.GetNamespace())
 		return err
@@ -453,6 +466,12 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return obj.GetName() == PlatformTrustedCABundleConfigMapName
 			})),
 		)
+	if config.GetConfig().EnableMLflowOperatorModuleController {
+		builder = builder.Watches(
+			&modulev1alpha1.MLflowOperator{},
+			handler.EnqueueRequestsFromMapFunc(r.mlflowOperatorToMLflowRequests),
+		)
+	}
 
 	// Use a separate raw source for `mlflow-gc` RBAC watches instead of widening the main cache.
 	// This is a workaround for two Kubernetes/controller-runtime constraints:
@@ -570,6 +589,31 @@ func (r *MLflowReconciler) configMapToMLflowRequests(ctx context.Context, obj cl
 			"mlflow", mlflow.Name,
 			"configmap", obj.GetName(),
 			"configmap-namespace", obj.GetNamespace())
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      mlflow.Name,
+				Namespace: mlflow.Namespace,
+			},
+		})
+	}
+	return requests
+}
+
+// mlflowOperatorToMLflowRequests maps singleton MLflowOperator changes to all MLflow instances.
+func (r *MLflowReconciler) mlflowOperatorToMLflowRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	log := logf.FromContext(ctx)
+	if obj.GetName() != modulev1alpha1.MLflowOperatorInstanceName {
+		return nil
+	}
+
+	mlflowList := &mlflowv1.MLflowList{}
+	if err := r.List(ctx, mlflowList); err != nil {
+		log.Error(err, "Failed to list MLflow instances for MLflowOperator watch")
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(mlflowList.Items))
+	for _, mlflow := range mlflowList.Items {
 		requests = append(requests, reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      mlflow.Name,
