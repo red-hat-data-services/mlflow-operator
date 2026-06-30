@@ -95,6 +95,20 @@ You can customize the gateway name and namespace if needed:
 make deploy-to-platform ODH_GATEWAY_NAME=my-gateway ODH_GATEWAY_NAMESPACE=my-namespace IMG=<some-registry>/mlflow-operator:tag
 ```
 
+### MLflowOperator module handoff
+
+`mlflow-operator` now also carries the cluster-scoped singleton `MLflowOperator` API at `components.platform.opendatahub.io/v1alpha1`. The corresponding controller path is guarded by `ENABLE_MLFLOW_OPERATOR_MODULE_CONTROLLER` and remains disabled by default so releases can ship safely before the coordinating ODH module-handler change lands. If that flag is enabled, startup now treats the `MLflowOperator` CRD as required: the operator waits up to `MLFLOW_OPERATOR_MODULE_CONTROLLER_CRD_WAIT_TIMEOUT` for the CRD to appear and fails startup if the timeout expires, rather than silently skipping controller registration.
+
+When that toggle is disabled, legacy platform behavior continues to rely on the existing env/flag contract such as `MLFLOW_URL`, `GATEWAY_NAME`, and `--namespace`. When it is enabled, additive modular inputs are also honored:
+
+- `APPLICATIONS_NAMESPACE` for startup-time operand targeting
+- `RELATED_IMAGE_ODH_MLFLOW_IMAGE` for the default MLflow runtime image
+- the singleton `MLflowOperator` spec for projected platform fields such as gateway domain
+
+`APPLICATIONS_NAMESPACE` is consumed directly from the operator Deployment so the process, cache, and namespace-scoped RBAC all agree on one target namespace. The `MLflowOperator` CR no longer carries a separate `applicationsNamespace` field.
+
+`RELATED_IMAGE_ODH_MLFLOW_IMAGE` is only the platform override. The vendored `MLFLOW_IMAGE` default in `config/base/params.env` remains the operator's baseline fallback and is still expected to exist for standalone and non-ODH deployment paths.
+
 **Option 4: Deploy to local Kind cluster**
 
 For local development and testing, you can deploy the MLflow operator to a Kind (Kubernetes IN Docker) cluster with various storage backend configurations:
@@ -103,14 +117,8 @@ For local development and testing, you can deploy the MLflow operator to a Kind 
 # Deploy with default configuration (SQLite + file storage)
 make deploy-kind
 
-# Deploy with PostgreSQL backend
-make deploy-kind BACKEND_STORE=postgres REGISTRY_STORE=postgres
-
-# Deploy with S3 storage (using SeaweedFS)
-make deploy-kind ARTIFACT_STORAGE=s3
-
-# Deploy with full production-like setup
-make deploy-kind BACKEND_STORE=postgres REGISTRY_STORE=postgres ARTIFACT_STORAGE=s3
+# Override the default MLflow image when needed
+MLFLOW_IMAGE=my-registry/mlflow:custom-tag make deploy-kind
 ```
 
 For detailed instructions, advanced configuration options, and troubleshooting, see the [Kind Deployment Guide](docs/kind-deployment.md).
@@ -274,7 +282,7 @@ Use `spec.migration.mode` to control operator-managed database migration orchest
 
 Operator-managed migration only supports documented SQL metadata store URIs for the backend and registry stores: `sqlite://` and `postgresql://`. Inline `file://` backend or registry metadata URIs are intentionally rejected, and `file://` metadata stores are not supported for operator-managed migration.
 
-If `spec.image.image` overrides the default image, the operator still uses that image for the migration Job. This supports hotfix and test images, but it also means the operator does not prevalidate the custom image's migration runtime contract before scale-down, so an incompatible custom image can still fail after the MLflow Deployment has been scaled down and cause downtime.
+If `spec.image.image` overrides the operator-configured image, the operator still uses that image for the migration Job. This supports hotfix and test images, but it also means the operator does not prevalidate the custom image's migration runtime contract before scale-down, so an incompatible custom image can still fail after the MLflow Deployment has been scaled down and cause downtime.
 
 The operator keeps Kubernetes Job retries finite, but it automatically recreates fresh migration Jobs after a short delay for retryable failures such as transient database connectivity issues. Terminal failures, such as version mismatches, unsupported metadata store URIs, or known Alembic revision-resolution errors, stop automatic retries and instruct the admin to use `mlflow.opendatahub.io/force-migrate` after fixing the issue.
 
@@ -289,7 +297,7 @@ For ODH/RHOAI MLflow images that ship `mlflow.store.db.migration_gap`, that Job 
 
 The operator automatically configures `MLFLOW_SERVER_CORS_ALLOWED_ORIGINS` with safe defaults:
 - Kubernetes service names (short, namespaced, and FQDN forms)
-- The data science gateway domain (from the operator's `MLFLOW_URL` env var)
+- The data science gateway base URL (from `MLFLOW_URL`, or from the singleton `MLflowOperator` gateway projection when the module-controller handoff is enabled)
 - `localhost` and `127.0.0.1` (for development and Kind integration tests)
 
 To allow additional origins, use `extraAllowedOrigins` in the MLflow CR:
@@ -394,6 +402,10 @@ MLflow coverage is split between:
 - Go end-to-end tests in `test/e2e/`, including the operator-managed upgrade flow
 - Python integration tests in `mlflow-tests/`
 
+For a repo-level map of Red Hat OpenShift AI MLflow fork validation, including
+Jenkins shift-left smoke and upgrade coverage, see the
+[RHOAI MLflow Fork Testing Guide](docs/rhoai-mlflow-testing.md).
+
 `mlflow-tests` also includes opt-in upgrade-phase pytest modules under:
 
 - `mlflow-tests/tests/upgrade/pre_upgrade/`
@@ -401,7 +413,7 @@ MLflow coverage is split between:
 
 Versioned files such as `test_3_10.py` run only when the applicable version threshold is at least `3.10`. `pre_upgrade` gates on `MLFLOW_TEST_SUPPORTED_VERSION`; `post_upgrade` gates on the pre-upgrade version recorded in the `mlflow-upgrade-test-version` ConfigMap in `upgrade_test_workspace`.
 
-For local runs, `bash mlflow-tests/images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` when needed, uses `upgrade_test_workspace` as the shared namespace and RBAC target for upgrade phases, and requires exactly one artifact backend for `pre_upgrade` or `post_upgrade`. The harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift` only when `route.openshift.io` resources are actually present; otherwise it uses the generic `base` overlay, and you can still override `INFRASTRUCTURE_PLATFORM` explicitly if needed. On OpenShift, the harness uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the older localhost port-forward path when needed. Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix, while `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path. A missing post-upgrade handoff ConfigMap still means there is no matching versioned dataset for that upgrade source and now exits cleanly as a successful skip, while malformed ConfigMap contents still fail fast. For normal current-version multi-backend runs, `test-run.sh` now tears down the `MLflow` CR and any self-managed PostgreSQL / SeaweedFS infrastructure between backend suites so later suites do not inherit metadata from earlier ones. `.github/workflows/upgrade-validation.yml` now runs `current-upgrade-pytest-validation`, which exercises the upgrade-tagged pytest machinery itself on the current build and keeps additive datasets such as `3.11` covered, alongside `seeded-upgrade-state-validation`, which seeds a `3.10.1` deployment, patches the running operator deployment and MLflow CR to the PR-built images, and reuses that upgraded state for `post_upgrade` validation. `.github/workflows/integration-tests.yml` continues to focus on the normal current-version integration matrix and now includes a Jenkins-like multi-backend row that runs multiple deployment options in a single `test-run.sh` invocation.
+For local runs, `bash mlflow-tests/images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` when needed, uses `upgrade_test_workspace` as the shared namespace and RBAC target for upgrade phases, and requires exactly one artifact backend for `pre_upgrade` or `post_upgrade`. The harness auto-selects `INFRASTRUCTURE_PLATFORM=openshift` only when `route.openshift.io` resources are actually present; otherwise it uses the generic `base` overlay, and you can still override `INFRASTRUCTURE_PLATFORM` explicitly if needed. On OpenShift, the harness uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the older localhost port-forward path when needed. Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix, while `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path. A missing post-upgrade handoff ConfigMap still means there is no matching versioned dataset for that upgrade source and now exits cleanly as a successful skip, while malformed ConfigMap contents still fail fast. For normal current-version multi-backend runs, `test-run.sh` now tears down the `MLflow` CR and any self-managed PostgreSQL / SeaweedFS infrastructure between backend suites so later suites do not inherit metadata from earlier ones. Reused post-upgrade resources remain preserved by default, but `CLEANUP_REUSED_RESOURCES=on_success` now lets callers keep failed runs for debugging while still cleaning up successful validation runs when `SKIP_CLEANUP=false`. `.github/workflows/upgrade-validation.yml` now runs `current-upgrade-pytest-validation`, which exercises the upgrade-tagged pytest machinery itself on the current build and keeps additive datasets such as `3.11` covered, alongside `seeded-upgrade-state-validation`, which seeds a `3.10.1` deployment, patches the running operator deployment and MLflow CR to the PR-built images, and reuses that upgraded state for `post_upgrade` validation. `.github/workflows/integration-tests.yml` continues to focus on the normal current-version integration matrix and now includes a Jenkins-like multi-backend row that runs multiple deployment options in a single `test-run.sh` invocation.
 
 ## Shift-left Upgrade Validation
 
@@ -410,6 +422,9 @@ This repository keeps a repo-local operator-chaos knowledge model at `chaos/know
 This workflow is intentionally offline and asset-focused. It fails fast when validation, command execution, or breaking knowledge/CRD changes are detected, and logs the relevant operator-chaos output directly in the failing step. Update `chaos/knowledge/mlflow.yaml` whenever the stable RHOAI controller topology, default chart-managed MLflow resources, or checked-in MLflow CRD shape changes in ways that should affect upgrade modeling.
 
 This does not replace the existing runtime upgrade coverage. Continue to use `make test-e2e-upgrade` and the `upgrade-tests` job in `.github/workflows/upgrade-validation.yml` for live migration validation.
+The [RHOAI MLflow Fork Testing Guide](docs/rhoai-mlflow-testing.md) also
+captures how this offline gate fits alongside Jenkins shift-left and the live
+runtime and upgrade workflows.
 
 ## Troubleshooting
 
