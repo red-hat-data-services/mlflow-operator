@@ -47,14 +47,21 @@ bash images/test-run.sh -m pre_upgrade
 SKIP_DEPLOYMENT=true \
 bash images/test-run.sh -m post_upgrade
 
-# Also delete the reused MLflow resources after the post-upgrade run.
+# Always delete the reused MLflow resources after the post-upgrade run.
 SKIP_DEPLOYMENT=true \
 CLEANUP_REUSED_RESOURCES=true \
+bash images/test-run.sh -m post_upgrade
+
+# Delete reused resources only after a successful post-upgrade run.
+SKIP_DEPLOYMENT=true \
+CLEANUP_REUSED_RESOURCES=on_success \
 bash images/test-run.sh -m post_upgrade
 ```
 
 If the preserved deployment includes self-deployed PostgreSQL or SeaweedFS,
-`CLEANUP_REUSED_RESOURCES=true` removes those harness-managed resources too.
+`CLEANUP_REUSED_RESOURCES=true` or `CLEANUP_REUSED_RESOURCES=on_success`
+removes those harness-managed resources too. `on_success` keeps them around when
+the run fails. These modes only take effect when `SKIP_CLEANUP=false`.
 
 ## Running tests in a container / CI
 
@@ -105,9 +112,9 @@ The script is configured entirely via environment variables. Variables can also 
 | `S3_ENDPOINT_URL` | _(unset)_ | S3 endpoint URL (`STORAGE_TYPE=s3` only). |
 | `DB_HOST` | _(auto)_ | PostgreSQL hostname (when either metadata store uses `postgres`). |
 | `DB_PORT` | `5432` | PostgreSQL port (when either metadata store uses `postgres`). |
-| `DB_USER` | `postgres` | PostgreSQL username (when either metadata store uses `postgres`). |
-| `DB_PASSWORD` | _(unset)_ | PostgreSQL password (when either metadata store uses `postgres`). |
-| `DB_NAME` | `mydatabase` | PostgreSQL database name (when either metadata store uses `postgres`). |
+| `DB_USER` | `mlflow` | PostgreSQL username. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
+| `DB_PASSWORD` | _(unset)_ | PostgreSQL password. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
+| `DB_NAME` | `mydatabase` | PostgreSQL database name. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
 | `DB_SSLMODE` | _(unset)_ | SSL mode for the PostgreSQL connection URI. |
 
 ### Infrastructure image overrides
@@ -136,7 +143,7 @@ The script is configured entirely via environment variables. Variables can also 
 | `SKIP_OPERATOR` | `false` | Skip operator deployment only. |
 | `SKIP_INFRASTRUCTURE` | `false` | Skip PostgreSQL/SeaweedFS deployment. |
 | `SKIP_CLEANUP` | `false` | Leave the deployment in place after the run. Requires exactly one backend; use it for inspection or later reuse. |
-| `CLEANUP_REUSED_RESOURCES` | `false` | With `SKIP_DEPLOYMENT=true`, also delete the reused MLflow CR, harness-managed RBAC, and any self-deployed PostgreSQL/SeaweedFS resources at the end of the run. |
+| `CLEANUP_REUSED_RESOURCES` | `false` | With `SKIP_DEPLOYMENT=true` and `SKIP_CLEANUP=false`, control cleanup of reused resources: `false` preserves them, `true` always deletes them, and `on_success` deletes them only after a successful run. |
 
 ### Other
 

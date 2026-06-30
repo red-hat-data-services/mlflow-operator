@@ -12,6 +12,11 @@ This project was generated using [Kubebuilder](https://book.kubebuilder.io/) v4.
 
 The MLflow custom resource is **cluster-scoped**, meaning it can be created without specifying a namespace and is accessible across the entire cluster.
 
+### MLflowOperator (components.platform.opendatahub.io/v1alpha1)
+
+The `MLflowOperator` custom resource is a **cluster-scoped singleton module CR** named `default-mlflowoperator`. It exists to carry platform-level MLflow module state and status during the ODH modularization handoff. The new in-repo `MLflowOperator` controller path is guarded by the `ENABLE_MLFLOW_OPERATOR_MODULE_CONTROLLER` rollout toggle and should stay disabled by default until the coordinating ODH module-handler change is ready. When that toggle is enabled, startup waits up to `MLFLOW_OPERATOR_MODULE_CONTROLLER_CRD_WAIT_TIMEOUT` for the `MLflowOperator` CRD and fails startup if the timeout expires, so explicit enablement never silently skips controller registration. Its status condition item schema intentionally mirrors the ODH platform operator condition shape, including optional `severity` and `lastHeartbeatTime`, so the shared handoff CR stays wire-compatible while both sides are rolling out.
+`APPLICATIONS_NAMESPACE` remains a Deployment/startup input for the operator itself and is not projected through the `MLflowOperator` CR spec, so cache scope and namespace-scoped RBAC stay aligned with the live operand target namespace.
+
 ### MLflowConfig (mlflow.kubeflow.org/v1)
 
 The MLflowConfig custom resource is **namespace-scoped**, allowing Kubernetes namespace owners to override the default artifact storage configuration for their namespace.
@@ -25,6 +30,11 @@ The `api/` folder contains the API type definitions owned by this repository:
 
 ```text
 api/
+├── mlflowoperator/
+│   └── v1alpha1/
+│       ├── groupversion_info.go     # MLflowOperator module API registration
+│       ├── mlflowoperator_types.go  # MLflowOperator singleton module CR
+│       └── zz_generated.deepcopy.go # Auto-generated DeepCopy methods
 ├── v1/
 │   ├── groupversion_info.go     # MLflow API group and version registration
 │   ├── mlflow_types.go          # MLflow resource type definitions
@@ -48,6 +58,7 @@ To add or modify fields in the MLflow resource:
 
 3. The CRDs will be updated at:
    - `config/crd/bases/mlflow.opendatahub.io_mlflows.yaml`
+   - `config/crd/bases/components.platform.opendatahub.io_mlflowoperators.yaml`
 
 Changes to the `MLflowConfig` schema must be made in the upstream `mlflow-kubernetes-plugins` repository, then vendored here at `config/crd/mlflow.kubeflow.org_mlflowconfigs.yaml`. This repo references that local copy from `config/crd/kustomization.yaml`.
 
@@ -68,6 +79,9 @@ make generate
 ```
 
 **Note**: Always regenerate manifests and code after modifying API types. CI will verify that generated code is up-to-date.
+
+The operator now fails fast at startup when `MLFLOW_IMAGE` is empty. Checked-in manifests still set that environment variable for normal overlay-based installs, and `deploy.py` requires `--mlflow-image` when it is creating an `MLflow` custom resource.
+During the MLflow modularization transition, keep legacy ODH deployment behavior and the new module-controller path cleanly separated. Prefer isolated helpers for legacy-vs-modular branching, and add concise inline comments only at the toggle boundary or where fallback precedence is otherwise non-obvious.
 
 When bumping the supported MLflow version, update `config/component_metadata.yaml`, then rerun the version-alignment verification. The Makefile injects `SupportedMLflowVersion` from that metadata via Go `-ldflags`; the test harness and test image read the same value through `scripts/print_supported_mlflow_version.py`. Top-level `scripts/` is preferred for developer-maintenance helpers like this; `test/scripts/` is reserved for test validation helpers.
 
@@ -240,7 +254,7 @@ make test-e2e-full
 
 `make test-e2e` expects an already-running Kubernetes cluster and does not create one.
 `make test-e2e-full` creates a Kind cluster (`KIND_CLUSTER`, default `mlflow`), builds/loads the image, and runs e2e tests.
-`make test-e2e-upgrade` runs the upgrade-focused e2e suite against an existing cluster and expects `MLFLOW_SEED_IMAGE` to point at a known-good MLflow `3.10.1` seed image. The default is pinned to the ODH release 1.1 digest (`v3.10.1+rhaiv.3`) so the upgrade path does not depend on rebuilding an intermediate seed image during test setup. The GitHub workflow deploys a `3.10.1`-compatible operator image plus a running MLflow `3.10.1` instance, and the upgrade Ginkgo test then scales the operator down, clears the MLflow image override, switches the operator Deployment to the current image, and scales the operator back up before verifying the operator-managed migration flow.
+`make test-e2e-upgrade` runs the upgrade-focused e2e suite against an existing cluster and expects `MLFLOW_SEED_IMAGE` to point at a known-good MLflow `3.10.1` seed image plus `MLFLOW_RUNTIME_IMAGE` to point at the current target MLflow image. The seed default is pinned to the ODH release 1.1 digest (`v3.10.1+rhaiv.3`) so the upgrade path does not depend on rebuilding an intermediate seed image during test setup. The GitHub workflow deploys a `3.10.1`-compatible operator image plus a running MLflow `3.10.1` instance, and the upgrade Ginkgo test then scales the operator down, repins the MLflow CR to the current runtime image, switches the operator Deployment to the current image, and scales the operator back up before verifying the operator-managed migration flow.
 Cluster cleanup is a separate step:
 
 ```bash
@@ -254,7 +268,9 @@ Quick workflow:
 make test-e2e-full
 
 # Upgrade-focused e2e run against an existing cluster
-make test-e2e-upgrade MLFLOW_SEED_IMAGE=quay.io/opendatahub/mlflow@sha256:ad51bbd7f770491da88dc1db3b3c84f7471d25c48026ecb385180b63b18f4c64
+make test-e2e-upgrade \
+  MLFLOW_SEED_IMAGE=quay.io/opendatahub/mlflow@sha256:ad51bbd7f770491da88dc1db3b3c84f7471d25c48026ecb385180b63b18f4c64 \
+  MLFLOW_RUNTIME_IMAGE=localhost/mlflow-runtime:ci
 
 # Cleanup when done
 make cleanup-kind-cluster
@@ -283,10 +299,15 @@ Selection rules:
 - Preserve the upgrade tracking-URI prefix logic on every connectivity path: seeded source versions before `3.12` still need a prefixless tracking URI even on the OpenShift `status.url` branch
 - Harness-driven upgrade phases require exactly one artifact backend; do not rely on the default multi-backend `file,s3` loop for `-m pre_upgrade` or `-m post_upgrade`
 - Harness-driven preserve/reuse flows also require exactly one artifact backend when `SKIP_CLEANUP=true`; reject ambiguous multi-backend preserve requests instead of preserving only the last backend
-- Harness-driven `SKIP_DEPLOYMENT=true` reuse runs preserve the reused `MLflow` CR and RBAC by default; set `CLEANUP_REUSED_RESOURCES=true` to opt into tearing down the reused `MLflow` CR, harness-managed RBAC, and any self-deployed PostgreSQL / SeaweedFS resources after validation
+- Harness-driven `SKIP_DEPLOYMENT=true` reuse runs preserve the reused `MLflow` CR and RBAC by default; set `CLEANUP_REUSED_RESOURCES=true` to always tear them down after validation, or `CLEANUP_REUSED_RESOURCES=on_success` to preserve failed runs for debugging while still cleaning up successful runs when `SKIP_CLEANUP=false`
 - Local Fedora/SELinux validation of the containerized `mlflow-tests` harness can fail before pytest starts if the test image (runs as UID `1001`) cannot read `~/.kube/config` or write the mounted results directory. Treat these as host-environment blockers, not suite failures: when reproducing the workflow locally, prefer running the container as the host user (for example `--user "$(id -u):$(id -g)"`) and keep SELinux-friendly bind labels such as `:z` on shared mounts or `:Z` on private writable temp/result directories.
 
 These upgrade pytest suites are opt-in only. A plain `pytest -v` run should not execute them unless the pytest marker expression explicitly selects `pre_upgrade` or `post_upgrade`.
+
+The long-form testing map for the RHOAI MLflow fork now lives in
+`docs/rhoai-mlflow-testing.md`. Keep that guide aligned whenever Jenkins
+shift-left MLflow entrypoints, workflow names in this repository, or the MLflow
+fork's migration-gap and UI-E2E references change.
 
 ### Linting
 
