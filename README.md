@@ -360,41 +360,22 @@ requires exactly one artifact backend for upgrade phases, and skips waiting on
 `status.version` because `rhoai-3.4` does not publish that field during this
 test flow.
 
-The chart-managed MLflow pod now keeps its liveness probe on `/health` but uses
-`/api/3.0/mlflow/server-info` for readiness, matching the unauthenticated
-Kubernetes auth-plugin allowlist more closely to the workspace-aware client
-path. `mlflow-tests/images/test-run.sh` now first uses
-`kubectl wait --for=condition=Available --timeout=300s` on the MLflow CR and
-then polls the resolved `MLFLOW_TRACKING_URI`
-`/api/3.0/mlflow/server-info` endpoint for up to 3 minutes. If `status.url`,
-`Available`, or `server-info` readiness checks time out,
-`mlflow-tests/images/collect-debug-logs.sh` collects namespace debug artifacts
-before the run exits. The shared pre-upgrade experiment seeding step also
-retries setup failures with a short backoff and reuses the named experiment when
+`mlflow-tests/images/test-run.sh` continues to probe `/mlflow/health` for
+readiness on this branch, but it now runs
+`mlflow-tests/images/collect-debug-logs.sh` if pre-pytest readiness checks such
+as `status.url` or `/health` time out so upgrade flakes preserve cluster
+evidence. The shared pre-upgrade experiment seeding step also retries setup
+failures with a short backoff and reuses the named experiment when
 `create_experiment` reports that it already exists.
-
-In the seeded upgrade validation workflow, the historical source state now uses
-both a pinned `3.10.1` MLflow runtime image and the matching pinned historical
-operator image before the job patches the deployment in place to the PR-built
-operator/runtime pair for `post_upgrade`.
-That seeded source state also restores the operator `config/rbac` tree from
-commit `38b88c61fa4acd0f35081e4d0685c10c0c5bea91` before pre-upgrade deployment,
-then reapplies the current operator manifests when the seeded validation job
-upgrades to the PR-built operator.
 
 Reused post-upgrade resources remain preserved by default, but
 `CLEANUP_REUSED_RESOURCES=on_success` now lets callers keep failed runs for
 debugging while still cleaning up successful validation runs when
 `SKIP_CLEANUP=false`.
-
-In the seeded upgrade validation workflow, the historical source state now uses
-both a pinned `3.10.1` MLflow runtime image and the matching pinned historical
-operator image before the job patches the deployment in place to the PR-built
-operator/runtime pair for `post_upgrade`.
-That seeded source state also restores the operator `config/rbac` tree from
-commit `38b88c61fa4acd0f35081e4d0685c10c0c5bea91` before pre-upgrade deployment,
-then reapplies the current operator manifests when the seeded validation job
-upgrades to the PR-built operator.
+Reused post-upgrade resources remain preserved by default, but
+`CLEANUP_REUSED_RESOURCES=on_success` now lets callers keep failed runs for
+debugging while still cleaning up successful validation runs when
+`SKIP_CLEANUP=false`.
 
 ## Shift-left Upgrade Validation
 
