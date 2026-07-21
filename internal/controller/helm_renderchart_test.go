@@ -94,23 +94,22 @@ func TestRenderChart(t *testing.T) {
 					}
 
 					container := containers[0].(map[string]interface{})
-					expectedLivenessPath := StaticPrefix + "/health"
-					expectedReadinessPath := StaticPrefix + "/api/3.0/mlflow/server-info"
+					expectedPath := StaticPrefix + "/health"
 
 					livenessPath, found, err := unstructured.NestedString(container, "livenessProbe", "httpGet", "path")
 					if err != nil || !found {
 						t.Fatalf("Failed to get livenessProbe path: found=%v, err=%v", found, err)
 					}
-					if livenessPath != expectedLivenessPath {
-						t.Errorf("livenessProbe path = %s, want %s", livenessPath, expectedLivenessPath)
+					if livenessPath != expectedPath {
+						t.Errorf("livenessProbe path = %s, want %s", livenessPath, expectedPath)
 					}
 
 					readinessPath, found, err := unstructured.NestedString(container, "readinessProbe", "httpGet", "path")
 					if err != nil || !found {
 						t.Fatalf("Failed to get readinessProbe path: found=%v, err=%v", found, err)
 					}
-					if readinessPath != expectedReadinessPath {
-						t.Errorf("readinessProbe path = %s, want %s", readinessPath, expectedReadinessPath)
+					if readinessPath != expectedPath {
+						t.Errorf("readinessProbe path = %s, want %s", readinessPath, expectedPath)
 					}
 				}
 				if !foundDeployment {

@@ -294,7 +294,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: {{ printf "%s/api/3.0/mlflow/server-info" $healthPrefix }}
+              path: {{ printf "%s/health" $healthPrefix }}
               port: https
               scheme: HTTPS
             initialDelaySeconds: 5
