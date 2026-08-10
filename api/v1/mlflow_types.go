@@ -19,6 +19,7 @@ package v1
 import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -73,6 +74,13 @@ type MLflowSpec struct {
 	//     storageClassName: fast-ssd
 	// +optional
 	Storage *corev1.PersistentVolumeClaimSpec `json:"storage,omitempty"`
+
+	// TemporaryStorage configures the writable /tmp emptyDir shared by the MLflow pod
+	// containers and related Jobs rendered from the chart.
+	// This is especially relevant when serving artifacts from remote storage because
+	// proxied upload/download flows can use temporary local disk space.
+	// +optional
+	TemporaryStorage *TemporaryStorageSpec `json:"temporaryStorage,omitempty"`
 
 	// BackendStoreURI is the URI for the MLflow backend store (metadata).
 	// Supported schemes: file://, sqlite://, mysql://, postgresql://, etc.
@@ -241,6 +249,91 @@ type CABundleConfigMapSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+}
+
+// TemporaryStorageSpec configures the writable /tmp emptyDir shared by the MLflow
+// server pod containers and auxiliary Jobs that reuse the same chart setting.
+type TemporaryStorageSpec struct {
+	// SizeLimit caps the writable /tmp emptyDir volume.
+	// When omitted, the operator/chart default is used.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
+}
+
+// GarbageCollectionSpec configures periodic garbage collection via `mlflow gc`.
+// The CronJob permanently removes soft-deleted runs, experiments, and logged models
+// along with their associated artifacts from the configured backend and artifact stores.
+type GarbageCollectionSpec struct {
+	// Schedule is the cron expression for when garbage collection runs
+	// (e.g., "0 2 * * 0" for weekly at 2 AM on Sunday).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Schedule string `json:"schedule"`
+
+	// OlderThan restricts garbage collection to resources that have been in the
+	// deleted state for at least this duration (e.g., "30d", "7d12h").
+	// If not specified, all soft-deleted resources are permanently removed regardless of age.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^(\d+(\.\d+)?d)?(\d+(\.\d+)?h)?(\d+(\.\d+)?m)?(\d+(\.\d+)?s)?$`
+	// +optional
+	OlderThan *string `json:"olderThan,omitempty"`
+
+	// Resources for the garbage collection Job container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// TraceArchivalSpec configures trace archival via a CronJob that runs the
+// standalone archival module. The archival config is also mounted into the
+// MLflow server so the UI can surface archival status.
+type TraceArchivalSpec struct {
+	// Enabled toggles trace archival. When true, the operator creates a
+	// CronJob that runs the standalone archival module and mounts the
+	// archival config into the MLflow server for UI awareness.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Schedule is the cron expression for when archival runs
+	// (e.g., "0 */6 * * *" for every 6 hours).
+	// +kubebuilder:default="0 */6 * * *"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Schedule *string `json:"schedule,omitempty"`
+
+	// Location is the artifact repository URI where archived span payloads
+	// are stored. Supports s3:// and file:// (file:// requires Storage).
+	// Required when enabled is true.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	Location *string `json:"location,omitempty"`
+
+	// Retention is the age threshold after which span payloads are archived
+	// out of the tracking store. Uses the duration grammar <int><unit> where
+	// unit is m, h, or d. Examples: "30d", "12h", "360m".
+	// Required when enabled is true.
+	// +kubebuilder:validation:Pattern=`^\d+[mhd]$`
+	// +kubebuilder:validation:MaxLength=16
+	// +optional
+	Retention *string `json:"retention,omitempty"`
+
+	// MaxTracesPerPass limits the number of traces archived in a single pass.
+	// +kubebuilder:default=1000
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxTracesPerPass *int32 `json:"maxTracesPerPass,omitempty"`
+
+	// LongRetentionAllowlist contains experiment IDs whose longer-than-broader
+	// retention values may be honored. Experiments not in this list use the
+	// broader server or workspace retention even if they set a longer value.
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	LongRetentionAllowlist []string `json:"longRetentionAllowlist,omitempty"`
+
+	// Resources for the trace archival CronJob container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ImageConfig contains container image configuration

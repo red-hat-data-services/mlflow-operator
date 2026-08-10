@@ -313,6 +313,7 @@ The `config/samples/` directory contains example MLflow custom resource configur
    - S3 for artifacts
    - No PVC required (fully remote)
    - Multi-replica deployment
+ - `temporaryStorage.sizeLimit` override for proxied artifact serving
    - Periodic garbage collection via CronJob
    - `mlflow-gc-sa` ServiceAccount for the CronJob
    - `mlflow-gc` ClusterRole and ClusterRoleBinding for the CronJob
