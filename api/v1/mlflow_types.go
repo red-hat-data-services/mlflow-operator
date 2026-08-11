@@ -19,6 +19,7 @@ package v1
 import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -73,6 +74,13 @@ type MLflowSpec struct {
 	//     storageClassName: fast-ssd
 	// +optional
 	Storage *corev1.PersistentVolumeClaimSpec `json:"storage,omitempty"`
+
+	// TemporaryStorage configures the writable /tmp emptyDir shared by the MLflow pod
+	// containers and related Jobs rendered from the chart.
+	// This is especially relevant when serving artifacts from remote storage because
+	// proxied upload/download flows can use temporary local disk space.
+	// +optional
+	TemporaryStorage *TemporaryStorageSpec `json:"temporaryStorage,omitempty"`
 
 	// BackendStoreURI is the URI for the MLflow backend store (metadata).
 	// Supported schemes: file://, sqlite://, mysql://, postgresql://, etc.
@@ -241,6 +249,15 @@ type CABundleConfigMapSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+}
+
+// TemporaryStorageSpec configures the writable /tmp emptyDir shared by the MLflow
+// server pod containers and auxiliary Jobs that reuse the same chart setting.
+type TemporaryStorageSpec struct {
+	// SizeLimit caps the writable /tmp emptyDir volume.
+	// When omitted, the operator/chart default is used.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // ImageConfig contains container image configuration
