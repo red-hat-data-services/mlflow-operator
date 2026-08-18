@@ -746,6 +746,21 @@ class MLflowDeployer:
             }
         }
 
+        # RHOAI 3.4.x can render the default HTTPS egress rule as cluster-only.
+        # Add an explicit unrestricted TCP/443 rule for externals3 so the MLflow
+        # server can reach public S3 endpoints during upgrade tests.
+        if self.args.artifact_storage == "externals3":
+            mlflow_cr["spec"]["networkPolicyAdditionalEgressRules"] = [
+                {
+                    "ports": [
+                        {
+                            "protocol": "TCP",
+                            "port": 443,
+                        }
+                    ]
+                }
+            ]
+
         # Configure backend store
         if use_postgres_backend:
             mlflow_cr["spec"]["backendStoreUriFrom"] = {
