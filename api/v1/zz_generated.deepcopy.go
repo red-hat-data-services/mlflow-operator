@@ -214,6 +214,13 @@ func (in *MLflowSpec) DeepCopyInto(out *MLflowSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.ServiceAccountAnnotations != nil {
+		in, out := &in.ServiceAccountAnnotations, &out.ServiceAccountAnnotations
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.Storage != nil {
 		in, out := &in.Storage, &out.Storage
 		*out = new(corev1.PersistentVolumeClaimSpec)

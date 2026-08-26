@@ -46,6 +46,10 @@ image:
 
 serviceAccount:
   name: mlflow-sa
+  # Annotations applied to this ServiceAccount (for example AWS IRSA:
+  # eks.amazonaws.com/role-arn). The operator copies spec.serviceAccountAnnotations
+  # onto the main, garbage-collection, and trace-archival ServiceAccounts.
+  annotations: {}
 
 # Resources for MLflow container
 resources:
@@ -282,6 +286,7 @@ garbageCollection:
   # the MLflow artifact proxy.
   serviceAccount:
     name: mlflow-gc-sa
+    annotations: {}
   # Optional. Restrict deletion to resources that have been soft-deleted for
   # at least this duration (e.g. "30d", "7d12h"). If not specified, all
   # soft-deleted resources are permanently removed regardless of age.
@@ -311,6 +316,7 @@ traceArchival:
   longRetentionAllowlist: []
   serviceAccount:
     name: mlflow-trace-archival-sa
+    annotations: {}
   resources:
     requests:
       cpu: 100m

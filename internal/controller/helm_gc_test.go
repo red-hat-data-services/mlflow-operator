@@ -385,6 +385,56 @@ func TestRenderChart_GarbageCollection(t *testing.T) {
 			},
 		},
 		{
+			name: "gc enabled - user env vars are rendered on the CronJob",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					BackendStoreURI: ptr(testBackendStoreURI),
+					Env: []corev1.EnvVar{
+						{Name: "AWS_DEFAULT_REGION", Value: "us-east-1"},
+					},
+					GarbageCollection: &mlflowv1.GarbageCollectionSpec{
+						Schedule: "0 2 * * 0",
+					},
+				},
+			},
+			namespace: "test-ns",
+			validateObjs: func(t *testing.T, objs []*unstructured.Unstructured) {
+				cronJob := findObject(objs, "CronJob", "mlflow-gc")
+				if cronJob == nil {
+					t.Fatal("CronJob not found in rendered objects")
+				}
+
+				containers, found, err := unstructured.NestedSlice(
+					cronJob.Object,
+					"spec", "jobTemplate", "spec", "template", "spec", "containers",
+				)
+				if err != nil || !found || len(containers) == 0 {
+					t.Fatalf("Failed to get CronJob containers: found=%v, err=%v", found, err)
+				}
+
+				container := containers[0].(map[string]interface{})
+				env, found, err := unstructured.NestedSlice(container, "env")
+				if err != nil || !found {
+					t.Fatalf("Failed to get CronJob env: found=%v, err=%v", found, err)
+				}
+
+				foundRegion := false
+				for _, e := range env {
+					envVar := e.(map[string]interface{})
+					if envVar["name"] == "AWS_DEFAULT_REGION" {
+						foundRegion = true
+						if envVar["value"] != "us-east-1" {
+							t.Errorf("AWS_DEFAULT_REGION = %v, want us-east-1", envVar["value"])
+						}
+					}
+				}
+				if !foundRegion {
+					t.Error("AWS_DEFAULT_REGION not found in GC CronJob env")
+				}
+			},
+		},
+		{
 			name: "gc with local storage - CronJob mounts PVC",
 			mlflow: &mlflowv1.MLflow{
 				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},

@@ -117,6 +117,15 @@ spec:
                 - name: MLFLOW_S3_IGNORE_TLS
                   value: "false"
                 {{- end }}
+                {{- range .Values.env }}
+                - name: {{ .name }}
+                  {{- if .valueFrom }}
+                  valueFrom:
+                    {{- toYaml .valueFrom | nindent 20 }}
+                  {{- else }}
+                  value: {{ .value | quote }}
+                  {{- end }}
+                {{- end }}
               {{- if .Values.envFrom }}
               envFrom:
                 {{- toYaml .Values.envFrom | nindent 16 }}

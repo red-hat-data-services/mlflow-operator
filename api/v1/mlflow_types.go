@@ -82,6 +82,14 @@ type MLflowSpec struct {
 	// +optional
 	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
 
+	// ServiceAccountAnnotations are annotations applied to every ServiceAccount
+	// the operator creates: the main MLflow ServiceAccount, plus the garbage
+	// collection and trace-archival ServiceAccounts when those workloads are enabled.
+	// Use this for cloud workload identity federation such as AWS IRSA
+	// (eks.amazonaws.com/role-arn).
+	// +optional
+	ServiceAccountAnnotations map[string]string `json:"serviceAccountAnnotations,omitempty"`
+
 	// Storage specifies the persistent storage configuration using standard PVC spec.
 	// Only required if using SQLite backend/registry stores or file-based artifacts.
 	// Not needed when using remote storage (S3, PostgreSQL, etc.).
@@ -216,7 +224,8 @@ type MLflowSpec struct {
 	// +optional
 	WorkspaceLabelSelector *metav1.LabelSelector `json:"workspaceLabelSelector,omitempty"`
 
-	// Env is a list of environment variables to set in the MLflow container
+	// Env is a list of environment variables to set in the MLflow container,
+	// garbage collection CronJob, and trace-archival CronJob.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
