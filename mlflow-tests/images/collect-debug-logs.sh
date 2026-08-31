@@ -43,10 +43,14 @@ if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
 fi
 
 kubectl get mlflow -n "$NAMESPACE" -o yaml > "${OUTPUT_DIR}/mlflow-cr.yaml" 2>&1 || true
+kubectl get mlflow -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{" url="}{.status.url}{" version="}{.status.version}{"\n"}{range .status.conditions[*]}{.type}={.status} reason={.reason} message={.message}{"\n"}{end}{end}' \
+    > "${OUTPUT_DIR}/mlflow-cr.status.txt" 2>&1 || true
 kubectl get pods -n "$NAMESPACE" -o wide > "${OUTPUT_DIR}/pods.txt" 2>&1 || true
 kubectl get deployments -n "$NAMESPACE" -o wide > "${OUTPUT_DIR}/deployments.txt" 2>&1 || true
 kubectl get jobs -n "$NAMESPACE" -o wide > "${OUTPUT_DIR}/jobs.txt" 2>&1 || true
 kubectl get svc -n "$NAMESPACE" -o wide > "${OUTPUT_DIR}/services.txt" 2>&1 || true
+kubectl get route -n "$NAMESPACE" -o wide > "${OUTPUT_DIR}/routes.txt" 2>&1 || true
+kubectl get ingress -n "$NAMESPACE" -o wide > "${OUTPUT_DIR}/ingress.txt" 2>&1 || true
 kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' > "${OUTPUT_DIR}/events.txt" 2>&1 || true
 
 for deployment in mlflow controller-manager; do

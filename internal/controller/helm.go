@@ -42,11 +42,12 @@ import (
 )
 
 const (
-	defaultStorageSize     = "2Gi"
-	defaultBackendStoreURI = "sqlite:////mlflow/mlflow.db"
-	defaultArtifactsDest   = "file:///mlflow/artifacts"
-	uvicornSSLCiphersEnv   = "UVICORN_SSL_CIPHERS"
-	uvicornSystemCiphers   = "PROFILE=SYSTEM"
+	defaultStorageSize          = "2Gi"
+	defaultTemporaryStorageSize = "1Gi"
+	defaultBackendStoreURI      = "sqlite:////mlflow/mlflow.db"
+	defaultArtifactsDest        = "file:///mlflow/artifacts"
+	uvicornSSLCiphersEnv        = "UVICORN_SSL_CIPHERS"
+	uvicornSystemCiphers        = "PROFILE=SYSTEM"
 )
 
 var helmLog = logf.Log.WithName("helm")
@@ -325,6 +326,14 @@ func (h *HelmRenderer) mlflowToHelmValues(
 		"accessMode":       accessMode,
 	}
 
+	temporaryStorageSizeLimit := defaultTemporaryStorageSize
+	if mlflow.Spec.TemporaryStorage != nil && mlflow.Spec.TemporaryStorage.SizeLimit != nil {
+		temporaryStorageSizeLimit = mlflow.Spec.TemporaryStorage.SizeLimit.String()
+	}
+	values["temporaryStorage"] = map[string]interface{}{
+		"sizeLimit": temporaryStorageSizeLimit,
+	}
+
 	backendStoreURI := ""
 	artifactsDest := defaultArtifactsDest
 
@@ -507,10 +516,15 @@ func (h *HelmRenderer) mlflowToHelmValues(
 	if mlflow.Spec.ServiceAccountName != nil {
 		serviceAccountName = *mlflow.Spec.ServiceAccountName
 	}
-	values["serviceAccount"] = map[string]interface{}{
+	saAnnotations := mlflow.Spec.ServiceAccountAnnotations
+	serviceAccountValues := map[string]interface{}{
 		"create": true,
 		"name":   serviceAccountName,
 	}
+	if len(saAnnotations) > 0 {
+		serviceAccountValues["annotations"] = saAnnotations
+	}
+	values["serviceAccount"] = serviceAccountValues
 
 	// Add OpenShift service-ca annotation for automatic cert provisioning
 	serviceAnnotations := map[string]interface{}{
@@ -626,9 +640,13 @@ func (h *HelmRenderer) mlflowToHelmValues(
 	if mlflow.Spec.GarbageCollection != nil {
 		gcValues["enabled"] = true
 		gcValues["schedule"] = mlflow.Spec.GarbageCollection.Schedule
-		gcValues["serviceAccount"] = map[string]interface{}{
+		gcSAValues := map[string]interface{}{
 			"name": GCServiceAccountName,
 		}
+		if len(saAnnotations) > 0 {
+			gcSAValues["annotations"] = saAnnotations
+		}
+		gcValues["serviceAccount"] = gcSAValues
 		if mlflow.Spec.GarbageCollection.OlderThan != nil {
 			gcValues["olderThan"] = *mlflow.Spec.GarbageCollection.OlderThan
 		}
@@ -654,9 +672,13 @@ func (h *HelmRenderer) mlflowToHelmValues(
 		if mlflow.Spec.TraceArchival.Schedule != nil {
 			taValues["schedule"] = *mlflow.Spec.TraceArchival.Schedule
 		}
-		taValues["serviceAccount"] = map[string]interface{}{
+		taSAValues := map[string]interface{}{
 			"name": TraceArchivalServiceAccountName,
 		}
+		if len(saAnnotations) > 0 {
+			taSAValues["annotations"] = saAnnotations
+		}
+		taValues["serviceAccount"] = taSAValues
 		if mlflow.Spec.TraceArchival.Location != nil {
 			taValues["location"] = *mlflow.Spec.TraceArchival.Location
 		}

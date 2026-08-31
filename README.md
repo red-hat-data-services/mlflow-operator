@@ -241,6 +241,11 @@ spec:
   defaultArtifactRoot: "s3://my-mlflow-bucket/artifacts/runs"
   serveArtifacts: true
 
+  # Optional: increase writable /tmp capacity for proxied artifact serving.
+  # The operator/chart default is 1Gi.
+  temporaryStorage:
+    sizeLimit: 2Gi
+
   # S3 credentials via secret
   envFrom:
     - secretRef:
@@ -251,6 +256,23 @@ spec:
       value: us-east-1
 ```
 
+`spec.env` and `spec.envFrom` are applied to the MLflow Deployment, the garbage collection CronJob, and the trace-archival CronJob so S3 region, endpoint, and credential configuration stay consistent across those workloads.
+
+To use cloud-native workload identity instead of static access keys (for example AWS IRSA on ROSA or EKS), set `spec.serviceAccountAnnotations` on the MLflow CR. Those annotations are applied to the main `mlflow-sa` ServiceAccount and, when enabled, to `mlflow-gc-sa` and `mlflow-trace-archival-sa`:
+
+```yaml
+spec:
+  artifactsDestination: "s3://my-mlflow-bucket/artifacts"
+  serveArtifacts: true
+  serviceAccountAnnotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mlflow-s3
+  env:
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1
+```
+
+Standalone Helm installs can set the same annotations under `serviceAccount.annotations`, `garbageCollection.serviceAccount.annotations`, and `traceArchival.serviceAccount.annotations`.
+
 Create the database credentials secret:
 ```bash
 # Create secret with database URIs
@@ -260,6 +282,11 @@ kubectl create secret generic mlflow-db-credentials \
   --from-literal=read-replica-backend-store-uri='postgresql://mlflow:password@postgres-reader.example.com:5432/mlflow' \
   -n <namespace>
 ```
+
+When `serveArtifacts` is enabled against remote storage such as S3, MLflow can spool
+artifact bytes through `/tmp` during proxied upload/download flows. Use
+`spec.temporaryStorage.sizeLimit` to raise that writable `emptyDir` above the 1Gi default
+for deployments that expect larger or more concurrent artifact transfers.
 
 ### Read-Replica Backend Routing
 
@@ -451,7 +478,7 @@ When CA bundles are present (platform or custom), PostgreSQL connections use `PG
 
 See the [config/samples](./config/samples/) directory for complete examples:
 - `mlflow_v1_mlflow.yaml` - OpenShift deployment with local storage, service-ca TLS, and a commented DRA example
-- `mlflow_v1_mlflow_remote_storage.yaml` - PostgreSQL primary/read-replica routing + S3 storage with horizontal scaling
+- `mlflow_v1_mlflow_remote_storage.yaml` - PostgreSQL primary/read-replica routing + S3 storage with horizontal scaling and a temporary storage override for proxied artifact serving
 - `mlflow_v1_mlflowconfig.yaml` - Namespace-scoped artifact storage override using the upstream `MLflowConfig` CRD
 
 ## Development

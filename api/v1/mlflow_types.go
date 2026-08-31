@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -81,6 +82,14 @@ type MLflowSpec struct {
 	// +optional
 	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
 
+	// ServiceAccountAnnotations are annotations applied to every ServiceAccount
+	// the operator creates: the main MLflow ServiceAccount, plus the garbage
+	// collection and trace-archival ServiceAccounts when those workloads are enabled.
+	// Use this for cloud workload identity federation such as AWS IRSA
+	// (eks.amazonaws.com/role-arn).
+	// +optional
+	ServiceAccountAnnotations map[string]string `json:"serviceAccountAnnotations,omitempty"`
+
 	// Storage specifies the persistent storage configuration using standard PVC spec.
 	// Only required if using SQLite backend/registry stores or file-based artifacts.
 	// Not needed when using remote storage (S3, PostgreSQL, etc.).
@@ -95,6 +104,13 @@ type MLflowSpec struct {
 	//     storageClassName: fast-ssd
 	// +optional
 	Storage *corev1.PersistentVolumeClaimSpec `json:"storage,omitempty"`
+
+	// TemporaryStorage configures the writable /tmp emptyDir shared by the MLflow pod
+	// containers and related Jobs rendered from the chart.
+	// This is especially relevant when serving artifacts from remote storage because
+	// proxied upload/download flows can use temporary local disk space.
+	// +optional
+	TemporaryStorage *TemporaryStorageSpec `json:"temporaryStorage,omitempty"`
 
 	// BackendStoreURI is the URI for the MLflow backend store (metadata).
 	// Inline backendStoreUri values intentionally support only sqlite:// and
@@ -208,7 +224,8 @@ type MLflowSpec struct {
 	// +optional
 	WorkspaceLabelSelector *metav1.LabelSelector `json:"workspaceLabelSelector,omitempty"`
 
-	// Env is a list of environment variables to set in the MLflow container
+	// Env is a list of environment variables to set in the MLflow container,
+	// garbage collection CronJob, and trace-archival CronJob.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -315,6 +332,15 @@ type CABundleConfigMapSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+}
+
+// TemporaryStorageSpec configures the writable /tmp emptyDir shared by the MLflow
+// server pod containers and auxiliary Jobs that reuse the same chart setting.
+type TemporaryStorageSpec struct {
+	// SizeLimit caps the writable /tmp emptyDir volume.
+	// When omitted, the operator/chart default is used.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // GarbageCollectionSpec configures periodic garbage collection via `mlflow gc`.
