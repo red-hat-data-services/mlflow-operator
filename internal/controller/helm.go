@@ -18,6 +18,7 @@ package controller
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -120,6 +121,8 @@ type RenderOptions struct {
 	// ServiceMonitorAvailable indicates if the ServiceMonitor CRD (monitoring.coreos.com/v1) is available.
 	// When false, metrics.enabled is set to false to prevent rendering the ServiceMonitor manifest.
 	ServiceMonitorAvailable bool
+	// ReferencedSecretResourceVersions makes Secret rotations change the MLflow pod template.
+	ReferencedSecretResourceVersions map[string]string
 }
 
 // NewHelmRenderer creates a new HelmRenderer
@@ -196,10 +199,17 @@ func (h *HelmRenderer) mlflowToHelmValues(
 		values["podLabels"] = podLabels
 	}
 
-	if len(mlflow.Spec.PodAnnotations) > 0 {
+	if len(mlflow.Spec.PodAnnotations) > 0 || opts.ReferencedSecretResourceVersions != nil {
 		podAnnotations := make(map[string]interface{})
 		for k, v := range mlflow.Spec.PodAnnotations {
 			podAnnotations[k] = v
+		}
+		if opts.ReferencedSecretResourceVersions != nil {
+			secretVersions, err := json.Marshal(opts.ReferencedSecretResourceVersions)
+			if err != nil {
+				return nil, fmt.Errorf("marshal referenced Secret resource versions: %w", err)
+			}
+			podAnnotations[secretResourceVersionsAnnotation] = string(secretVersions)
 		}
 		values["podAnnotations"] = podAnnotations
 	}

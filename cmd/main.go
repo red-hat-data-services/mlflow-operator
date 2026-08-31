@@ -305,10 +305,13 @@ func main() {
 
 	// Build the ByObject cache configuration
 	byObjectCache := map[client.Object]cache.ByObject{
-		&appsv1.Deployment{}:            {Label: labelSelector},
-		&batchv1.Job{}:                  {Label: migrationJobLabelSelector},
-		&corev1.Pod{}:                   {Label: migrationJobLabelSelector},
-		&corev1.Secret{}:                {Label: labelSelector},
+		&appsv1.Deployment{}: {Label: labelSelector},
+		&batchv1.Job{}:       {Label: migrationJobLabelSelector},
+		&corev1.Pod{}:        {Label: migrationJobLabelSelector},
+		// Secrets are watched across the target namespace so rotations of user-provided
+		// credentials can trigger an MLflow rollout. The controller's map function
+		// filters these events to only Secrets referenced by an MLflow CR.
+		&corev1.Secret{}:                {},
 		&corev1.Service{}:               {Label: labelSelector},
 		&corev1.ServiceAccount{}:        {Label: labelSelector},
 		&corev1.PersistentVolumeClaim{}: {Label: labelSelector},

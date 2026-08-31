@@ -248,6 +248,12 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("%s", msg)
 	}
 
+	secretResourceVersions, err := r.referencedSecretResourceVersions(ctx, mlflow, targetNamespace)
+	if err != nil {
+		log.Error(err, "Failed to read referenced Secret resource versions")
+		return ctrl.Result{}, err
+	}
+
 	// Render the Helm chart
 	helmChartPath := r.ChartPath
 	if helmChartPath == "" {
@@ -257,8 +263,9 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	renderOpts := RenderOptions{
 		PlatformTrustedCABundleExists: platformCABundleExists,
 		// If ConsoleLink is available, we can assume we are on OpenShift
-		IsOpenShift:             r.ConsoleLinkAvailable,
-		ServiceMonitorAvailable: r.ServiceMonitorAvailable,
+		IsOpenShift:                      r.ConsoleLinkAvailable,
+		ServiceMonitorAvailable:          r.ServiceMonitorAvailable,
+		ReferencedSecretResourceVersions: secretResourceVersions,
 	}
 	objects, err := renderer.RenderChart(mlflow, targetNamespace, renderOpts, cfg)
 	if err != nil {
@@ -474,7 +481,6 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
-		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
@@ -494,6 +500,10 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return obj.GetName() == PlatformTrustedCABundleConfigMapName
 			})),
 		)
+	builder = builder.Watches(
+		&corev1.Secret{},
+		handler.EnqueueRequestsFromMapFunc(r.secretToMLflowRequests),
+	)
 	if config.GetConfig().EnableMLflowOperatorModuleController {
 		builder = builder.Watches(
 			&modulev1alpha1.MLflowOperator{},

@@ -183,6 +183,8 @@ The deployment always sets `MLFLOW_DISABLE_TELEMETRY=true` and `MLFLOW_SERVER_EN
 
 TLS is terminated inside the MLflow container using uvicorn options. Certificates come from the `mlflow-tls` secret, which is created automatically on OpenShift via the `service.beta.openshift.io/serving-cert-secret-name` annotation. If you need to provide your own certificates, place `tls.crt` and `tls.key` in a secret named `mlflow-tls` (or override `tls.secretName` in Helm values). On OpenShift, the operator sets `UVICORN_SSL_CIPHERS=PROFILE=SYSTEM` by default unless `spec.env` already defines that variable, so uvicorn follows the platform crypto policy, including FIPS-compatible TLS 1.2 and 1.3 cipher selection.
 
+The operator watches Secrets in its target namespace and filters events to the Secrets referenced by the MLflow server (`mlflow-tls`, database URI references, `spec.env`, and `spec.envFrom`). It records their resource versions in the operator-managed `mlflow.opendatahub.io/secret-resource-versions` pod-template annotation, so rotating a referenced Secret triggers a standard Deployment rollout. Do not set this annotation in `spec.podAnnotations`; the operator owns its value.
+
 When garbage collection is enabled, the CronJob runs under a separate `mlflow-gc-sa` ServiceAccount with its own suffixed `mlflow-gc{{ resourceSuffix }}` ClusterRole and ClusterRoleBinding. The retained `experiments/update` permission is only needed when artifact deletion still goes through the MLflow artifact proxy; metadata cleanup itself uses the backend store directly.
 
 ### Operator RBAC Privileges
