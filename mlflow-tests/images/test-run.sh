@@ -602,6 +602,7 @@ wait_for_mlflow_server_info() {
     echo "  Waiting for MLflow server-info endpoint at $api_url..."
     while true; do
         http_code="$(curl -skS --connect-timeout 5 --max-time 5 \
+            -H "Authorization: Bearer ${kube_token}" \
             -o "$body_file" -w "%{http_code}" "$api_url" 2>"$err_file" || true)"
         [ -n "$http_code" ] || http_code="000"
         if [ "$http_code" = "200" ]; then
@@ -965,6 +966,17 @@ run_suite() {
     fi
     echo "  MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI"
 
+    # The external Gateway URL redirects unauthenticated requests to OAuth. Create
+    # the service-account token before probing it so readiness exercises the same
+    # authenticated API path as the tests below.
+    echo "  Generating token for ${MLFLOW_SA_NAME}..."
+    if ! kube_token=$(kubectl create token "$MLFLOW_SA_NAME" --namespace "$NAMESPACE"); then
+        echo "ERROR: Failed to create token for $MLFLOW_SA_NAME" >&2
+        fail_suite "test_create_kube_token" "Failed to create token for ${MLFLOW_SA_NAME}"
+        return 1
+    fi
+    export kube_token
+
     # ── MLflow CR availability ─────────────────────────────────────────────────
     if ! wait_for_mlflow_cr_available; then
         return 1
@@ -997,15 +1009,6 @@ run_suite() {
         sleep 2
         export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-http://localhost:9000}"
     fi
-
-    # ── Kube token ──────────────────────────────────────────────────────────────
-    echo "  Generating token for ${MLFLOW_SA_NAME}..."
-    if ! kube_token=$(kubectl create token "$MLFLOW_SA_NAME" --namespace "$NAMESPACE"); then
-        echo "ERROR: Failed to create token for $MLFLOW_SA_NAME" >&2
-        fail_suite "test_create_kube_token" "Failed to create token for ${MLFLOW_SA_NAME}"
-        return 1
-    fi
-    export kube_token
 
     # ── Tests ───────────────────────────────────────────────────────────────────
     # Export artifact_storage and serve_artifacts so Config reads in the test suite
