@@ -75,6 +75,8 @@ type MLflowReconciler struct {
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,resourceNames=mlflow-artifact-connection,verbs=get;list;watch
 // +kubebuilder:rbac:groups=mlflow.kubeflow.org,resources=mlflowconfigs,verbs=get;list;watch
+// Required to create and update the GC ClusterRole without RBAC escalation.
+// +kubebuilder:rbac:groups=mlflow.kubeflow.org,resources=experiments,verbs=get;list;update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // Shared server RBAC objects are statically named `mlflow` and watched through metadata.name
 // field selectors so list/watch remains compatible with resourceNames-scoped authorization.
