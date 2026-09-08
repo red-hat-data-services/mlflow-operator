@@ -262,7 +262,7 @@ class MLflowDeployer:
         return "Always"
 
     def create_postgres_secret(self):
-        """Create PostgreSQL credentials secret"""
+        """Create or update the PostgreSQL credentials secret."""
         print("🔐 Creating PostgreSQL credentials secret...")
 
         # URL-encode credentials to handle special characters like @, /, :, ;
@@ -273,18 +273,27 @@ class MLflowDeployer:
         backend_uri = f"postgresql://{encoded_user}:{encoded_pass}@{self.args.postgres_host}:{self.args.postgres_port}/{self.args.postgres_backend_db}{sslmode_param}"
         registry_uri = f"postgresql://{encoded_user}:{encoded_pass}@{self.args.postgres_host}:{self.args.postgres_port}/{self.args.postgres_registry_db}{sslmode_param}"
 
-        # Delete existing secret if it exists
-        self.run_command([
-            "kubectl", "delete", "secret", "mlflow-db-credentials",
-            "--ignore-not-found", "-n", self.args.namespace
-        ], capture_output=True)
-
-        self.run_command([
-            "kubectl", "create", "secret", "generic", "mlflow-db-credentials",
-            f"--from-literal=backend-store-uri={backend_uri}",
-            f"--from-literal=registry-store-uri={registry_uri}",
-            "-n", self.args.namespace
-        ], "Creating PostgreSQL credentials secret", capture_output=True)
+        secret = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "mlflow-db-credentials",
+                "namespace": self.args.namespace,
+            },
+            "type": "Opaque",
+            "stringData": {
+                "backend-store-uri": backend_uri,
+                "registry-store-uri": registry_uri,
+            },
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as secret_file:
+            yaml.safe_dump(secret, secret_file)
+            secret_file.flush()
+            self.run_command(
+                ["kubectl", "apply", "-f", secret_file.name],
+                "Applying PostgreSQL credentials secret",
+                capture_output=True,
+            )
 
     def create_s3_secret(self):
         """Create S3/AWS credentials secret"""
