@@ -242,28 +242,12 @@ jobs:
           ARTIFACT_BACKENDS: ${{ matrix.artifact_storage }}
           BACKEND_STORE: ${{ matrix.backend_store }}
           REGISTRY_STORE: ${{ matrix.backend_store }}
-        run: |
-          mkdir -p test-results
-          docker run --rm --network host \
-            -v "$HOME/.kube:/mlflow/.kube:ro,z" \
-            -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
-            -e DEPLOY_MLFLOW_OPERATOR=false \
-            -e SKIP_CLEANUP=true \
-            -e NAMESPACE="${{ env.NAMESPACE }}" \
-            -e MLFLOW_OPERATOR_IMAGE="${{ env.OPERATOR_RUNTIME_IMAGE }}" \
-            -e MLFLOW_IMAGE="${{ env.MLFLOW_RUNTIME_IMAGE }}" \
-            -e BACKEND_STORE="${BACKEND_STORE}" \
-            -e REGISTRY_STORE="${REGISTRY_STORE}" \
-            -e ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS}" \
-            -e SERVE_ARTIFACTS=true \
-            -e AWS_ACCESS_KEY_ID="${{ env.AWS_ACCESS_KEY_ID }}" \
-            -e AWS_SECRET_ACCESS_KEY="${{ env.AWS_SECRET_ACCESS_KEY }}" \
-            -e AWS_S3_BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e upgrade_test_workspace="${{ env.UPGRADE_TEST_WORKSPACE }}" \
-            -e TEST_RESULTS_DIR="/mlflow/results/pre" \
-            "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" \
-            -m pre_upgrade
+          SERVE_ARTIFACTS: "true"
+          SKIP_CLEANUP: "true"
+          upgrade_test_workspace: ${{ env.UPGRADE_TEST_WORKSPACE }}
+          TEST_RESULTS_DIR: test-results/pre
+          PYTEST_MARK_EXPRESSION: pre_upgrade
+        run: mlflow-tests/images/run-integration-tests.sh
 
       - name: Run current-version post-upgrade validation phase
         shell: bash
@@ -271,29 +255,14 @@ jobs:
           ARTIFACT_BACKENDS: ${{ matrix.artifact_storage }}
           BACKEND_STORE: ${{ matrix.backend_store }}
           REGISTRY_STORE: ${{ matrix.backend_store }}
-        run: |
-          docker run --rm --network host \
-            -v "$HOME/.kube:/mlflow/.kube:ro,z" \
-            -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
-            -e DEPLOY_MLFLOW_OPERATOR=false \
-            -e SKIP_DEPLOYMENT=true \
-            -e SKIP_CLEANUP=false \
-            -e CLEANUP_REUSED_RESOURCES=on_success \
-            -e NAMESPACE="${{ env.NAMESPACE }}" \
-            -e MLFLOW_OPERATOR_IMAGE="${{ env.OPERATOR_RUNTIME_IMAGE }}" \
-            -e MLFLOW_IMAGE="${{ env.MLFLOW_RUNTIME_IMAGE }}" \
-            -e BACKEND_STORE="${BACKEND_STORE}" \
-            -e REGISTRY_STORE="${REGISTRY_STORE}" \
-            -e ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS}" \
-            -e SERVE_ARTIFACTS=true \
-            -e AWS_ACCESS_KEY_ID="${{ env.AWS_ACCESS_KEY_ID }}" \
-            -e AWS_SECRET_ACCESS_KEY="${{ env.AWS_SECRET_ACCESS_KEY }}" \
-            -e AWS_S3_BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e upgrade_test_workspace="${{ env.UPGRADE_TEST_WORKSPACE }}" \
-            -e TEST_RESULTS_DIR="/mlflow/results/post" \
-            "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" \
-            -m post_upgrade
+          SERVE_ARTIFACTS: "true"
+          SKIP_DEPLOYMENT: "true"
+          SKIP_CLEANUP: "false"
+          CLEANUP_REUSED_RESOURCES: "on_success"
+          upgrade_test_workspace: ${{ env.UPGRADE_TEST_WORKSPACE }}
+          TEST_RESULTS_DIR: test-results/post
+          PYTEST_MARK_EXPRESSION: post_upgrade
+        run: mlflow-tests/images/run-integration-tests.sh
 
       - name: Upload current upgrade pytest reports
         if: ${{ always() }}
@@ -428,30 +397,16 @@ jobs:
           ARTIFACT_BACKENDS: ${{ matrix.artifact_storage }}
           BACKEND_STORE: ${{ matrix.backend_store }}
           REGISTRY_STORE: ${{ matrix.backend_store }}
-        run: |
-          mkdir -p test-results
-          docker run --rm --network host \
-            -v "$HOME/.kube:/mlflow/.kube:ro,z" \
-            -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
-            -e DEPLOY_MLFLOW_OPERATOR=false \
-            -e SKIP_OPERATOR=true \
-            -e SKIP_CLEANUP=true \
-            -e NAMESPACE="${{ env.NAMESPACE }}" \
-            -e MLFLOW_OPERATOR_IMAGE="${{ env.MLFLOW_SEED_OPERATOR_IMAGE }}" \
-            -e MLFLOW_IMAGE="${{ env.MLFLOW_SEED_IMAGE }}" \
-            -e BACKEND_STORE="${BACKEND_STORE}" \
-            -e REGISTRY_STORE="${REGISTRY_STORE}" \
-            -e ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS}" \
-            -e SERVE_ARTIFACTS=true \
-            -e AWS_ACCESS_KEY_ID="${{ env.AWS_ACCESS_KEY_ID }}" \
-            -e AWS_SECRET_ACCESS_KEY="${{ env.AWS_SECRET_ACCESS_KEY }}" \
-            -e AWS_S3_BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e MLFLOW_TEST_SUPPORTED_VERSION=3.10 \
-            -e upgrade_test_workspace="${{ env.UPGRADE_TEST_WORKSPACE }}" \
-            -e TEST_RESULTS_DIR="/mlflow/results/pre" \
-            "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" \
-            -m pre_upgrade
+          SERVE_ARTIFACTS: "true"
+          OPERATOR_RUNTIME_IMAGE: ${{ env.MLFLOW_SEED_OPERATOR_IMAGE }}
+          MLFLOW_RUNTIME_IMAGE: ${{ env.MLFLOW_SEED_IMAGE }}
+          SKIP_OPERATOR: "true"
+          SKIP_CLEANUP: "true"
+          MLFLOW_TEST_SUPPORTED_VERSION: "3.10"
+          upgrade_test_workspace: ${{ env.UPGRADE_TEST_WORKSPACE }}
+          TEST_RESULTS_DIR: test-results/pre
+          PYTEST_MARK_EXPRESSION: pre_upgrade
+        run: mlflow-tests/images/run-integration-tests.sh
 
       - name: Upgrade seeded deployment in place
         shell: bash
@@ -467,7 +422,7 @@ jobs:
             --type=merge \
             -p '{"spec":{"image":{"image":"${{ env.MLFLOW_RUNTIME_IMAGE }}","imagePullPolicy":"IfNotPresent"}}}'
           kubectl wait \
-            --for="jsonpath={.status.version}=3.14.0" \
+            --for="jsonpath={.status.version}=3.15.2" \
             mlflow/mlflow \
             --namespace "${{ env.NAMESPACE }}" \
             --timeout=300s
@@ -481,30 +436,14 @@ jobs:
           ARTIFACT_BACKENDS: ${{ matrix.artifact_storage }}
           BACKEND_STORE: ${{ matrix.backend_store }}
           REGISTRY_STORE: ${{ matrix.backend_store }}
-        run: |
-          # Reuse the upgraded seeded deployment so post_upgrade validates the
-          # in-place handoff from the seeded source version to the PR-built target.
-          docker run --rm --network host \
-            -v "$HOME/.kube:/mlflow/.kube:ro,z" \
-            -v "${{ github.workspace }}/test-results:/mlflow/results:z" \
-            -e DEPLOY_MLFLOW_OPERATOR=false \
-            -e SKIP_DEPLOYMENT=true \
-            -e SKIP_CLEANUP=true \
-            -e NAMESPACE="${{ env.NAMESPACE }}" \
-            -e MLFLOW_OPERATOR_IMAGE="${{ env.OPERATOR_RUNTIME_IMAGE }}" \
-            -e MLFLOW_IMAGE="${{ env.MLFLOW_RUNTIME_IMAGE }}" \
-            -e BACKEND_STORE="${BACKEND_STORE}" \
-            -e REGISTRY_STORE="${REGISTRY_STORE}" \
-            -e ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS}" \
-            -e SERVE_ARTIFACTS=true \
-            -e AWS_ACCESS_KEY_ID="${{ env.AWS_ACCESS_KEY_ID }}" \
-            -e AWS_SECRET_ACCESS_KEY="${{ env.AWS_SECRET_ACCESS_KEY }}" \
-            -e AWS_S3_BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e BUCKET="${{ env.AWS_S3_BUCKET }}" \
-            -e upgrade_test_workspace="${{ env.UPGRADE_TEST_WORKSPACE }}" \
-            -e TEST_RESULTS_DIR="/mlflow/results/post" \
-            "${{ env.MLFLOW_TESTS_RUNTIME_IMAGE }}" \
-            -m post_upgrade
+          SERVE_ARTIFACTS: "true"
+          SKIP_DEPLOYMENT: "true"
+          SKIP_CLEANUP: "true"
+          upgrade_test_workspace: ${{ env.UPGRADE_TEST_WORKSPACE }}
+          TEST_RESULTS_DIR: test-results/post
+          PYTEST_MARK_EXPRESSION: post_upgrade
+        # Reuse the in-place upgraded seeded deployment for post-upgrade validation.
+        run: mlflow-tests/images/run-integration-tests.sh
 
       - name: Upload seeded upgrade validation reports
         if: ${{ always() }}

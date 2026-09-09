@@ -364,3 +364,140 @@ func (r *MLflowReconciler) reconcileHttpRoute(
 	log.V(1).Info("Successfully reconciled HttpRoute", "name", httpRouteName, "pathPrefix", pathPrefix)
 	return nil
 }
+
+func artifactHTTPRouteRule(matchPath, replacementPath, serviceName string) gatewayv1.HTTPRouteRule {
+	pathMatchType := gatewayv1.PathMatchPathPrefix
+	servicePort := gatewayv1.PortNumber(8443)
+	weight := int32(1)
+	return gatewayv1.HTTPRouteRule{
+		Matches: []gatewayv1.HTTPRouteMatch{{
+			Path: &gatewayv1.HTTPPathMatch{Type: &pathMatchType, Value: &matchPath},
+		}},
+		Filters: []gatewayv1.HTTPRouteFilter{{
+			Type: gatewayv1.HTTPRouteFilterURLRewrite,
+			URLRewrite: &gatewayv1.HTTPURLRewriteFilter{Path: &gatewayv1.HTTPPathModifier{
+				Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+				ReplacePrefixMatch: &replacementPath,
+			}},
+		}},
+		BackendRefs: []gatewayv1.HTTPBackendRef{{
+			BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{
+					Name: gatewayv1.ObjectName(serviceName),
+					Port: &servicePort,
+				},
+				Weight: &weight,
+			},
+		}},
+	}
+}
+
+// reconcileArtifactsHTTPRoute creates or updates the route for the dedicated artifact server.
+func (r *MLflowReconciler) reconcileArtifactsHTTPRoute(
+	ctx context.Context,
+	mlflow *mlflowv1.MLflow,
+	namespace string,
+	cfg *config.OperatorConfig,
+) error {
+	if !isArtifactsServerEnabled(mlflow) {
+		return nil
+	}
+	if !r.HTTPRouteAvailable {
+		return fmt.Errorf("%s", artifactsServerHTTPRouteRequiredMessage)
+	}
+
+	suffix := getResourceSuffix(mlflow.Name)
+	resourceName := ArtifactsResourceName + suffix
+	pathPrefix := "/" + resourceName
+	trackingPathPrefix := "/" + ResourceName + suffix
+	pathMatchType := gatewayv1.PathMatchPathPrefix
+	servicePort := gatewayv1.PortNumber(8443)
+	weight := int32(1)
+	gatewayNamespace := gatewayv1.Namespace("openshift-ingress")
+
+	rules := []gatewayv1.HTTPRouteRule{
+		artifactHTTPRouteRule(
+			trackingPathPrefix+ArtifactsProxyAPIPath,
+			pathPrefix+ArtifactsProxyAPIPath,
+			resourceName,
+		),
+		artifactHTTPRouteRule(
+			trackingPathPrefix+ArtifactsAJAXProxyAPIPath,
+			pathPrefix+ArtifactsAJAXProxyAPIPath,
+			resourceName,
+		),
+	}
+	// MLflow's UI resolves these artifact operations through metadata-aware tracking handlers.
+	for _, endpoint := range []string{
+		"/get-artifact",
+		"/model-versions/get-artifact",
+		"/ajax-api/2.0/mlflow/artifacts/list",
+		"/ajax-api/2.0/mlflow/upload-artifact",
+		"/ajax-api/2.0/mlflow/get-artifact",
+		"/ajax-api/2.0/mlflow/get-trace-artifact",
+		"/ajax-api/3.0/mlflow/get-trace-artifact",
+	} {
+		rules = append(rules, artifactHTTPRouteRule(trackingPathPrefix+endpoint, pathPrefix+endpoint, resourceName))
+	}
+	// Gateway API cannot portably wildcard the model ID in the middle of artifact paths. This is
+	// the narrowest prefix available, so other logged-model APIs also reach the metadata-aware pod.
+	loggedModelsPrefix := "/ajax-api/2.0/mlflow/logged-models/"
+	rules = append(rules, artifactHTTPRouteRule(
+		trackingPathPrefix+loggedModelsPrefix,
+		pathPrefix+loggedModelsPrefix,
+		resourceName,
+	))
+	rules = append(rules, gatewayv1.HTTPRouteRule{
+		Matches: []gatewayv1.HTTPRouteMatch{{
+			Path: &gatewayv1.HTTPPathMatch{Type: &pathMatchType, Value: &pathPrefix},
+		}},
+		BackendRefs: []gatewayv1.HTTPBackendRef{{
+			BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{
+					Name: gatewayv1.ObjectName(resourceName),
+					Port: &servicePort,
+				},
+				Weight: &weight,
+			},
+		}},
+	})
+
+	httpRoute := &gatewayv1.HTTPRoute{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "gateway.networking.k8s.io/v1",
+			Kind:       "HTTPRoute",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app": ResourceName,
+			},
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{
+						Name:      gatewayv1.ObjectName(cfg.GatewayName),
+						Namespace: &gatewayNamespace,
+					},
+				},
+			},
+			Rules: rules,
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(mlflow, httpRoute, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference on artifacts HTTPRoute: %w", err)
+	}
+	if err := r.applyObject(ctx, httpRoute); err != nil {
+		return fmt.Errorf("failed to apply artifacts HTTPRoute: %w", err)
+	}
+
+	logf.FromContext(ctx).V(1).Info(
+		"Successfully reconciled artifacts HTTPRoute",
+		"name", resourceName,
+		"pathPrefix", pathPrefix,
+	)
+	return nil
+}

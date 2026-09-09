@@ -63,15 +63,16 @@ resources:
 # Persistent storage
 # Only required if using file-based or SQLite backend/registry stores or file-based artifacts.
 # Set false when using remote storage (S3, PostgreSQL, etc.)
+# Workloads mount this claim only when their configured URIs require local storage.
 storage:
   enabled: true  # Enable by default - disable for remote file-based storage
   size: 2Gi
   storageClassName: ""  # Use default storage class
   accessMode: ReadWriteOnce
 
-# Writable temporary storage shared by the MLflow pod containers and related Jobs.
-# This matters most when serveArtifacts is enabled against remote artifact storage,
-# because proxied upload/download flows can spool artifact data through /tmp.
+# Writable temporary storage used by the tracking and artifact-server pods and related Jobs.
+# This matters most when artifacts are proxied from remote storage because upload/download
+# flows can spool artifact data through /tmp.
 temporaryStorage:
   sizeLimit: 1Gi
 
@@ -173,8 +174,57 @@ mlflow:
   # Leave empty for direct access without a prefix
   staticPrefix: ""
 
-# Environment variables for MLflow container
-# Supports both direct values and references to secrets/configmaps
+# Optional dedicated metadata-aware artifact-serving MLflow server. The operator supplies artifactRoot from
+# its external gateway URL and creates the matching HTTPRoute. Standalone chart users must
+# expose the Service themselves and set artifactRoot to that externally reachable artifact API.
+# Operator deployments keep port, staticPrefix, TLS, and Service settings fixed so they stay
+# aligned with the managed HTTPRoute and serving-certificate contract.
+# Dedicated serving requires remote SQL metadata stores and does not mount storage in the
+# tracking pod. Inline SQLite metadata URIs are rejected. Standalone Helm cannot inspect
+# Secret-backed values, which must resolve to remote SQL; operator reconciliation validates
+# those Secret keys before rendering.
+# The server uses --serve-artifacts and the same metadata stores as the tracking server so UI
+# artifact handlers can resolve runs, model versions, traces, and logged models. Server-side
+# job execution remains disabled.
+artifactsServer:
+  enabled: false
+  replicaCount: 1
+  # Storage destination used by the artifact server. A file:// destination requires
+  # storage.enabled=true. One replica may use ReadWriteOnce; multiple replicas require
+  # storage.accessMode=ReadWriteMany.
+  artifactsDestination: "file:///mlflow/artifacts"
+  # Externally reachable artifact API root used as the default by both servers, for example:
+  # https://mlflow.example.com/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts
+  artifactRoot: ""
+  # Standalone installs may use a SQL workspace store. When caBundle.configMaps is
+  # configured, the artifact container receives the same PostgreSQL/MySQL CA settings as tracking.
+  workspaceStoreUri: "kubernetes://"
+  # Optional label selector applied to the Kubernetes workspace provider.
+  workspaceLabelSelector: ""
+  # Number of uvicorn workers in each MLflow artifacts-server pod.
+  workers: 1
+  port: 8443
+  # Accept Gateway Host headers by default, matching operator-managed deployments.
+  # Standalone production installs should restrict this to their external hostnames.
+  allowedHosts:
+    - "*"
+  staticPrefix: "/mlflow-artifacts"
+  # Pod-level Dynamic Resource Allocation claims for artifact pods. Pair each entry
+  # with a same-named resources.claims reference below.
+  resourceClaims: []
+  # Empty resources inherit main-server requests and limits, but not claims.
+  resources: {}
+  tls:
+    secretName: mlflow-artifacts-tls
+    defaultMode: 420
+  service:
+    type: ClusterIP
+    port: 8443
+    annotations: {}
+
+# Environment variables shared by the MLflow containers.
+# Supports both direct values and references to secrets/configmaps. Tracking and artifact
+# containers receive the same metadata-store and artifact-storage environment.
 env:
   - name: MLFLOW_LOGGING_LEVEL
     value: INFO
@@ -210,7 +260,8 @@ service:
 
 # Metrics and Prometheus configuration
 # When enabled, the --expose-prometheus flag is passed to MLflow and a ServiceMonitor is created.
-# Metrics are served on the main HTTPS port at /metrics endpoint.
+# Metrics are served by the tracking server on the main HTTPS port at /metrics. The ServiceMonitor
+# does not select the dedicated artifact Service, which does not enable Prometheus exposition.
 metrics:
   enabled: true  # Enable Prometheus metrics and ServiceMonitor
   # TLS configuration for Prometheus scraping
@@ -274,6 +325,8 @@ resourceClaims: []
 # Permanently removes soft-deleted runs, experiments, and logged models
 # along with their artifacts. Resources must be soft-deleted first
 # (e.g. via the UI or API) before garbage collection will remove them.
+# Proxied artifact locations are resolved through the tracking Service normally
+# and through the dedicated artifact Service when artifactsServer is enabled.
 garbageCollection:
   # Set to true to create the CronJob. Default: false (no garbage collection).
   enabled: false
@@ -310,6 +363,9 @@ traceArchival:
   # Cron schedule expression (e.g. "0 */6 * * *" for every 6 hours).
   # Required when enabled.
   schedule: "0 */6 * * *"
+  # A file:// location requires storage.enabled=true and ReadWriteMany access.
+  # Secret-backed metadata without storage.enabled is treated as remote; when storage is
+  # enabled, its unknown scheme requires ReadWriteMany so the CronJob can share the PVC safely.
   # location: "s3://mlflow-trace-archive"
   # retention: "30d"
   maxTracesPerPass: 1000

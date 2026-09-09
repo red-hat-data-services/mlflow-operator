@@ -349,6 +349,23 @@ class TestBase:
                         logger.warning(error_msg)
                         cleanup_errors.append(error_msg)
 
+        if self.test_context.jobs_to_delete:
+            logger.info(f"Cleaning up {len(self.test_context.jobs_to_delete)} Jobs")
+            ClientManager.load_k8s_config()
+            batch_api = k8s_client.BatchV1Api()
+            for name, namespace in self.test_context.jobs_to_delete.items():
+                try:
+                    batch_api.delete_namespaced_job(
+                        name=name,
+                        namespace=namespace,
+                        propagation_policy="Foreground",
+                    )
+                    logger.info(f"Deleted Job {name} in namespace {namespace}")
+                except Exception as e:
+                    error_msg = f"Failed to delete Job {name} in namespace {namespace}: {e}"
+                    logger.warning(error_msg)
+                    cleanup_errors.append(error_msg)
+
         # Cleanup namespaces
         if self.test_context.namespaces_to_delete:
             namespaces = sorted(self.test_context.namespaces_to_delete)

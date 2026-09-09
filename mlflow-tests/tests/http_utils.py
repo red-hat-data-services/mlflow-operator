@@ -1,5 +1,7 @@
 """Shared HTTP helpers for integration-style test requests."""
 
+import os
+
 from tests.constants.config import Config
 
 
@@ -15,3 +17,19 @@ def get_requests_verify_value() -> bool | str:
     if Config.CA_BUNDLE:
         return Config.CA_BUNDLE
     return True
+
+
+def configure_ca_bundle_environment() -> None:
+    bundle_variables = (
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "AWS_CA_BUNDLE",
+    )
+    if Config.CA_BUNDLE:
+        for name in bundle_variables:
+            os.environ[name] = Config.CA_BUNDLE
+    else:
+        for name in bundle_variables:
+            if os.environ.get(name) == "":
+                os.environ.pop(name)

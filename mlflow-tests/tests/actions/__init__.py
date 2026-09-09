@@ -46,6 +46,15 @@ from .artifact_actions import (
 from .trace_actions import (
     action_post_trace_v3_direct,
 )
+from .trace_archival_actions import (
+    action_prepare_archival_smoke,
+    action_seed_archival_traces,
+    action_persist_archival_spans_via_otlp,
+    action_wait_for_archival_retention,
+    action_run_archival_job_from_cronjob,
+    action_wait_for_archive_objects,
+    action_reload_archival_traces,
+)
 from .workspace_actions import (
     action_list_workspaces,
 )
@@ -82,5 +91,12 @@ __all__ = [
     "action_create_mlflowconfig",
     "action_wait_for_mlflowconfig_active",
     "action_post_trace_v3_direct",
+    "action_prepare_archival_smoke",
+    "action_seed_archival_traces",
+    "action_persist_archival_spans_via_otlp",
+    "action_wait_for_archival_retention",
+    "action_run_archival_job_from_cronjob",
+    "action_wait_for_archive_objects",
+    "action_reload_archival_traces",
     "action_list_workspaces",
 ]

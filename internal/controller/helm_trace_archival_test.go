@@ -222,6 +222,9 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
 				Spec: mlflowv1.MLflowSpec{
 					BackendStoreURI: ptr(testBackendStoreURI),
+					Storage: &corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					},
 					TraceArchival: &mlflowv1.TraceArchivalSpec{
 						Enabled:   true,
 						Schedule:  ptr("*/5 * * * *"),
@@ -235,6 +238,9 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 				cronJob := findObject(objs, "CronJob", "mlflow-trace-archival")
 				if cronJob == nil {
 					t.Fatal("trace archival CronJob not found")
+				}
+				if cronJobHasStorageVolume(t, cronJob) {
+					t.Error("trace archival CronJob unexpectedly mounts unused storage")
 				}
 
 				schedule, found, err := unstructured.NestedString(cronJob.Object, "spec", "schedule")
@@ -284,13 +290,51 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 			},
 		},
 		{
-			name: "archival enabled with backend secret - CronJob mirrors backend store URI",
+			name: "archival enabled with backend secret and no storage - CronJob does not mount PVC",
 			mlflow: &mlflowv1.MLflow{
 				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
 				Spec: mlflowv1.MLflowSpec{
 					BackendStoreURIFrom: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "mlflow-db-credentials"},
 						Key:                  "backend-store-uri",
+					},
+					TraceArchival: &mlflowv1.TraceArchivalSpec{
+						Enabled:   true,
+						Schedule:  ptr("*/5 * * * *"),
+						Location:  ptr("s3://trace-archive"),
+						Retention: ptr("30d"),
+					},
+				},
+			},
+			namespace: "test-ns",
+			validateObjs: func(t *testing.T, objs []*unstructured.Unstructured) {
+				cronJob := findObject(objs, "CronJob", "mlflow-trace-archival")
+				if cronJob == nil {
+					t.Fatal("trace archival CronJob not found")
+				}
+				if cronJobHasStorageVolume(t, cronJob) {
+					t.Error("trace archival CronJob unexpectedly mounts storage for Secret-backed remote metadata")
+				}
+				assertCronJobEnvSecretRef(
+					t,
+					cronJob,
+					"MLFLOW_BACKEND_STORE_URI",
+					"mlflow-db-credentials",
+					"backend-store-uri",
+				)
+			},
+		},
+		{
+			name: "archival enabled with backend secret and RWX storage - CronJob mounts PVC",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					BackendStoreURIFrom: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "mlflow-db-credentials"},
+						Key:                  "backend-store-uri",
+					},
+					Storage: &corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 					},
 					TraceArchival: &mlflowv1.TraceArchivalSpec{
 						Enabled:  true,
@@ -303,6 +347,9 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 				cronJob := findObject(objs, "CronJob", "mlflow-trace-archival")
 				if cronJob == nil {
 					t.Fatal("trace archival CronJob not found")
+				}
+				if !cronJobHasStorageVolume(t, cronJob) {
+					t.Error("trace archival CronJob does not mount Secret-backed metadata storage")
 				}
 				assertCronJobEnvSecretRef(
 					t,
@@ -318,6 +365,57 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 					"mlflow-db-credentials",
 					"backend-store-uri",
 				)
+			},
+		},
+		{
+			name: "archival enabled with backend secret and RWO storage - render fails",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					BackendStoreURIFrom: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "mlflow-db-credentials"},
+						Key:                  "backend-store-uri",
+					},
+					Storage: &corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					},
+					TraceArchival: &mlflowv1.TraceArchivalSpec{
+						Enabled:   true,
+						Schedule:  ptr("*/5 * * * *"),
+						Location:  ptr("s3://trace-archive"),
+						Retention: ptr("30d"),
+					},
+				},
+			},
+			namespace: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "archival with remote location and SQLite metadata - CronJob mounts PVC",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					BackendStoreURI: ptr("sqlite:////mlflow/mlflow.db"),
+					Storage: &corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+					},
+					TraceArchival: &mlflowv1.TraceArchivalSpec{
+						Enabled:   true,
+						Schedule:  ptr("*/5 * * * *"),
+						Location:  ptr("s3://trace-archive"),
+						Retention: ptr("30d"),
+					},
+				},
+			},
+			namespace: "test-ns",
+			validateObjs: func(t *testing.T, objs []*unstructured.Unstructured) {
+				cronJob := findObject(objs, "CronJob", "mlflow-trace-archival")
+				if cronJob == nil {
+					t.Fatal("trace archival CronJob not found")
+				}
+				if !cronJobHasStorageVolume(t, cronJob) {
+					t.Error("trace archival CronJob does not mount SQLite metadata storage")
+				}
 			},
 		},
 		{
@@ -469,7 +567,9 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 				Spec: mlflowv1.MLflowSpec{
 					BackendStoreURI:      ptr("sqlite:////mlflow/mlflow.db"),
 					ArtifactsDestination: ptr("file:///mlflow/artifacts"),
-					Storage:              &corev1.PersistentVolumeClaimSpec{},
+					Storage: &corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+					},
 					TraceArchival: &mlflowv1.TraceArchivalSpec{
 						Enabled:  true,
 						Schedule: ptr("*/5 * * * *"),
@@ -531,6 +631,25 @@ func TestRenderChart_TraceArchival(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
 				Spec: mlflowv1.MLflowSpec{
 					BackendStoreURI: ptr(testBackendStoreURI),
+					TraceArchival: &mlflowv1.TraceArchivalSpec{
+						Enabled:  true,
+						Schedule: ptr("*/5 * * * *"),
+						Location: ptr("file:///mlflow/traces"),
+					},
+				},
+			},
+			namespace: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "archival with file location and ReadWriteOnce storage - render fails",
+			mlflow: &mlflowv1.MLflow{
+				ObjectMeta: metav1.ObjectMeta{Name: "mlflow"},
+				Spec: mlflowv1.MLflowSpec{
+					BackendStoreURI: ptr(testBackendStoreURI),
+					Storage: &corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					},
 					TraceArchival: &mlflowv1.TraceArchivalSpec{
 						Enabled:  true,
 						Schedule: ptr("*/5 * * * *"),

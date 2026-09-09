@@ -22,16 +22,62 @@
 #   WORKSPACE_LABEL_SELECTOR    label selector JSON (default: empty)
 #   POSTGRES_TLS                true | false (default: false)
 #   SEAWEEDFS_TLS               true | false (default: false)
+#   ARTIFACTS_SERVER            true | false (default: false)
+#   ARTIFACTS_SERVER_GATEWAY    true | false (default: false)
 #   PYTEST_ARGS                 extra pytest flags
+#   PYTEST_MARK_EXPRESSION      optional pytest -m expression
 #   TEST_RESULTS_DIR            host path for JUnit XML output (default: test-results)
+#   SKIP_DEPLOYMENT             forward deployment reuse behavior to test-run.sh
+#   SKIP_OPERATOR               forward operator reuse behavior to test-run.sh
+#   SKIP_CLEANUP                forward cleanup behavior to test-run.sh
+#   CLEANUP_REUSED_RESOURCES    forward reused-resource cleanup behavior to test-run.sh
+#   MLFLOW_TEST_SUPPORTED_VERSION
+#                               override the version used to select upgrade datasets
+#   upgrade_test_workspace      namespace used by upgrade pre/post phases
 
 set -euo pipefail
 
 results_dir="${TEST_RESULTS_DIR:-test-results}"
 mkdir -p "$results_dir"
 
+if [ "${ARTIFACTS_SERVER:-false}" = "true" ]; then
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  if ! kubectl get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1; then
+    kubectl apply -f "$repo_root/test/crd/httproutes.gateway.networking.k8s.io.yaml"
+  fi
+  kubectl wait --for=condition=Established \
+    crd/httproutes.gateway.networking.k8s.io --timeout=60s
+fi
+
+pytest_marker_args=()
+if [ -n "${PYTEST_MARK_EXPRESSION:-}" ]; then
+  pytest_marker_args=(-m "$PYTEST_MARK_EXPRESSION")
+fi
+
+docker_args=(--rm --network host)
+# MLflow signs SeaweedFS URLs with its in-cluster service endpoint. test-run.sh
+# port-forwards that service to the runner, so make the exact signed-URL host
+# resolve to the runner loopback from this host-networked test container.
+if [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
+  docker_args+=(
+    --add-host "minio-service.${NAMESPACE}.svc.cluster.local:127.0.0.1"
+  )
+fi
+
+for name in \
+  SKIP_DEPLOYMENT \
+  SKIP_OPERATOR \
+  SKIP_CLEANUP \
+  CLEANUP_REUSED_RESOURCES \
+  MLFLOW_TEST_SUPPORTED_VERSION \
+  upgrade_test_workspace; do
+  if [[ -v "$name" ]]; then
+    docker_args+=(-e "$name=${!name}")
+  fi
+done
+
 set +e
-docker run --rm --network host \
+docker run "${docker_args[@]}" \
   -v "$HOME/.kube:/mlflow/.kube:ro,z" \
   -v "$(cd "$results_dir" && pwd):/mlflow/results:z" \
   -e DEPLOY_MLFLOW_OPERATOR=false \
@@ -42,6 +88,8 @@ docker run --rm --network host \
   -e REGISTRY_STORE="$REGISTRY_STORE" \
   -e ARTIFACT_BACKENDS="$ARTIFACT_BACKENDS" \
   -e SERVE_ARTIFACTS="$SERVE_ARTIFACTS" \
+  -e ARTIFACTS_SERVER="${ARTIFACTS_SERVER:-false}" \
+  -e ARTIFACTS_SERVER_GATEWAY="${ARTIFACTS_SERVER_GATEWAY:-false}" \
   -e AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
   -e AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
   -e AWS_S3_BUCKET="$AWS_S3_BUCKET" \
@@ -51,7 +99,7 @@ docker run --rm --network host \
   -e SEAWEEDFS_TLS="${SEAWEEDFS_TLS:-false}" \
   -e TEST_RESULTS_DIR="/mlflow/results" \
   "$MLFLOW_TESTS_RUNTIME_IMAGE" \
-  ${PYTEST_ARGS:-}
+  ${PYTEST_ARGS:-} "${pytest_marker_args[@]}"
 
 exit_code=$?
 set -e

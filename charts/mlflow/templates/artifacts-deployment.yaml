@@ -1,54 +1,10 @@
-{{- if and (not .Values.mlflow.backendStoreUri) (empty .Values.mlflow.backendStoreUriFrom) }}
-{{- fail "mlflow.backendStoreUri or mlflow.backendStoreUriFrom must be set" }}
-{{- end }}
-{{- with .Values.mlflow.backendStoreUriFrom }}
-{{- if not .secretKeyRef }}
-{{- fail "mlflow.backendStoreUriFrom.secretKeyRef must include non-empty 'name' and 'key'" }}
-{{- else if or (not .secretKeyRef.name) (not .secretKeyRef.key) }}
-{{- fail "mlflow.backendStoreUriFrom.secretKeyRef must include non-empty 'name' and 'key'" }}
-{{- end }}
-{{- end }}
-{{- with .Values.mlflow.readReplicaBackendStoreUriFrom }}
-{{- if not .secretKeyRef }}
-{{- fail "mlflow.readReplicaBackendStoreUriFrom.secretKeyRef must include non-empty 'name' and 'key'" }}
-{{- else if or (not .secretKeyRef.name) (not .secretKeyRef.key) }}
-{{- fail "mlflow.readReplicaBackendStoreUriFrom.secretKeyRef must include non-empty 'name' and 'key'" }}
-{{- end }}
-{{- end }}
-{{- with .Values.mlflow.registryStoreUriFrom }}
-{{- if not .secretKeyRef }}
-{{- fail "mlflow.registryStoreUriFrom.secretKeyRef must include non-empty 'name' and 'key'" }}
-{{- else if or (not .secretKeyRef.name) (not .secretKeyRef.key) }}
-{{- fail "mlflow.registryStoreUriFrom.secretKeyRef must include non-empty 'name' and 'key'" }}
-{{- end }}
-{{- end }}
-{{- if and .Values.artifactsServer.enabled .Values.mlflow.serveArtifacts }}
-{{- fail "mlflow.serveArtifacts and artifactsServer.enabled are mutually exclusive" }}
-{{- end }}
-{{- if and .Values.artifactsServer.enabled (not .Values.artifactsServer.artifactRoot) }}
-{{- fail "artifactsServer.artifactRoot must be set when artifactsServer.enabled is true" }}
-{{- end }}
-{{- if and .Values.artifactsServer.enabled (empty .Values.artifactsServer.artifactsDestination) }}
-{{- fail "artifactsServer.artifactsDestination must be set when artifactsServer.enabled is true" }}
-{{- end }}
-{{- if and .Values.artifactsServer.enabled (hasPrefix "file://" .Values.artifactsServer.artifactsDestination) (not .Values.storage.enabled) }}
-{{- fail "file-based artifactsServer.artifactsDestination requires storage.enabled=true" }}
-{{- end }}
-{{- if and .Values.artifactsServer.enabled (hasPrefix "file://" .Values.artifactsServer.artifactsDestination) (gt (int .Values.artifactsServer.replicaCount) 1) (ne .Values.storage.accessMode "ReadWriteMany") }}
-{{- fail "multiple file-backed artifact server replicas require storage.accessMode=ReadWriteMany" }}
-{{- end }}
-{{- if and .Values.artifactsServer.enabled (or (hasPrefix "sqlite://" .Values.mlflow.backendStoreUri) (hasPrefix "sqlite+" .Values.mlflow.backendStoreUri) (hasPrefix "sqlite://" (.Values.mlflow.registryStoreUri | default "")) (hasPrefix "sqlite+" (.Values.mlflow.registryStoreUri | default "")) (hasPrefix "sqlite://" (.Values.mlflow.readReplicaBackendStoreUri | default "")) (hasPrefix "sqlite+" (.Values.mlflow.readReplicaBackendStoreUri | default ""))) }}
-{{- fail "artifactsServer cannot be enabled with inline SQLite metadata stores" }}
-{{- end }}
-{{- $trackingMountsStorage := eq (include "mlflow.trackingMountsStorage" .) "true" -}}
-{{- if and (gt (int .Values.replicaCount) 1) $trackingMountsStorage (ne .Values.storage.accessMode "ReadWriteMany") }}
-{{- fail "multiple tracking replicas that mount storage require storage.accessMode=ReadWriteMany" }}
-{{- end }}
-{{- $healthPrefix := .Values.mlflow.staticPrefix | trimSuffix "/" -}}
+{{- if .Values.artifactsServer.enabled }}
+{{- $healthPrefix := .Values.artifactsServer.staticPrefix | trimSuffix "/" -}}
+{{- $artifactsMountStorage := eq (include "mlflow.artifactsMountsStorage" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mlflow{{ .Values.resourceSuffix }}
+  name: mlflow-artifacts{{ .Values.resourceSuffix }}
   namespace: {{ .Values.namespace }}
   labels:
     app: mlflow{{ .Values.resourceSuffix }}
@@ -56,14 +12,11 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.artifactsServer.replicaCount }}
   strategy:
-    {{- if $trackingMountsStorage }}
-    # Use Recreate strategy when PVC is attached to prevent conflicts
-    # (ReadWriteOnce volumes cannot be shared between pods during rolling updates)
+    {{- if $artifactsMountStorage }}
     type: Recreate
     {{- else }}
-    # Use RollingUpdate for zero-downtime deployments when using remote storage
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
@@ -71,11 +24,11 @@ spec:
     {{- end }}
   selector:
     matchLabels:
-      app: mlflow{{ .Values.resourceSuffix }}
+      app: mlflow-artifacts{{ .Values.resourceSuffix }}
   template:
     metadata:
       labels:
-        app: mlflow{{ .Values.resourceSuffix }}
+        app: mlflow-artifacts{{ .Values.resourceSuffix }}
         app.kubernetes.io/instance: mlflow{{ .Values.resourceSuffix }}
         {{- with .Values.commonLabels }}
         {{- toYaml . | nindent 8 }}
@@ -106,7 +59,7 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.resourceClaims }}
+      {{- with .Values.artifactsServer.resourceClaims }}
       resourceClaims:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -114,30 +67,20 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.temporaryStorage.sizeLimit }}
-        {{- if $trackingMountsStorage }}
+        {{- if $artifactsMountStorage }}
         - name: mlflow-storage
           persistentVolumeClaim:
             claimName: mlflow-pvc{{ .Values.resourceSuffix }}
         {{- end }}
-        - name: mlflow-tls
+        - name: mlflow-artifacts-tls
           secret:
-            secretName: {{ .Values.tls.secretName }}
-            defaultMode: {{ .Values.tls.defaultMode | default 420 }}
+            secretName: {{ .Values.artifactsServer.tls.secretName }}
+            defaultMode: {{ .Values.artifactsServer.tls.defaultMode | default 420 }}
         {{- include "mlflow.caBundleVolumes" . | nindent 8 }}
-        {{- if .Values.metrics.enabled }}
-        - name: metrics
-          emptyDir:
-            sizeLimit: 100Mi
-        {{- end }}
-        {{- if .Values.traceArchival.enabled }}
-        - name: trace-archival-config
-          configMap:
-            name: mlflow-trace-archival-config{{ .Values.resourceSuffix }}
-        {{- end }}
       {{- include "mlflow.caBundleInitContainers" . | nindent 6 }}
 
       containers:
-        - name: mlflow
+        - name: mlflow-artifacts
           image: {{ .Values.image.name }}
           {{- if .Values.image.imagePullPolicy }}
           imagePullPolicy: {{ .Values.image.imagePullPolicy }}
@@ -146,44 +89,26 @@ spec:
             - mlflow
           args:
             - server
-            {{- if .Values.artifactsServer.enabled }}
-            - --no-serve-artifacts
-            - --default-artifact-root={{ .Values.artifactsServer.artifactRoot }}
-            {{- else if .Values.mlflow.serveArtifacts }}
             - --serve-artifacts
-            - --artifacts-destination={{ .Values.mlflow.artifactsDestination }}
-            {{- else }}
-            - --no-serve-artifacts
-            {{- end }}
-            {{- if and (not .Values.artifactsServer.enabled) .Values.mlflow.defaultArtifactRoot }}
-            - --default-artifact-root={{ .Values.mlflow.defaultArtifactRoot }}
-            {{- end }}
+            - --artifacts-destination={{ .Values.artifactsServer.artifactsDestination }}
+            - --default-artifact-root={{ .Values.artifactsServer.artifactRoot }}
             - --app-name=kubernetes-auth
             - --enable-workspaces
-            - --workspace-store-uri={{ .Values.mlflow.workspaceStoreUri }}
+            - --workspace-store-uri={{ .Values.artifactsServer.workspaceStoreUri }}
             - --host=0.0.0.0
-            - --port={{ .Values.mlflow.port }}
-            - --workers={{ .Values.mlflow.workers }}
+            - --port={{ .Values.artifactsServer.port }}
+            - --workers={{ .Values.artifactsServer.workers }}
             - "--uvicorn-opts=--ssl-keyfile=/etc/tls/private/tls.key --ssl-certfile=/etc/tls/private/tls.crt --proxy-headers"
-            {{- if .Values.mlflow.allowedHosts }}
+            {{- if .Values.artifactsServer.allowedHosts }}
             - --allowed-hosts
-            - "{{ join "," .Values.mlflow.allowedHosts }}"
+            - "{{ join "," .Values.artifactsServer.allowedHosts }}"
             {{- end }}
-            {{- if .Values.mlflow.staticPrefix }}
-            - --static-prefix={{ .Values.mlflow.staticPrefix }}
-            {{- end }}
-            {{- if .Values.metrics.enabled }}
-            - --expose-prometheus=/prometheus
+            {{- if .Values.artifactsServer.staticPrefix }}
+            - --static-prefix={{ .Values.artifactsServer.staticPrefix }}
             {{- end }}
           env:
             - name: MLFLOW_DISABLE_TELEMETRY
               value: "true"
-            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
-              value: "false"
-            {{- if .Values.traceArchival.enabled }}
-            - name: MLFLOW_TRACE_ARCHIVAL_CONFIG
-              value: "/etc/mlflow/trace-archival.yaml"
-            {{- end }}
             - name: MLFLOW_BACKEND_STORE_URI
               {{- if .Values.mlflow.backendStoreUriFrom }}
               valueFrom:
@@ -211,15 +136,12 @@ spec:
             {{- end }}
             - name: MLFLOW_K8S_AUTH_AUTHORIZATION_MODE
               value: "self_subject_access_review"
-            {{- if .Values.mlflow.corsAllowedOrigins }}
-            - name: MLFLOW_SERVER_CORS_ALLOWED_ORIGINS
-              value: {{ .Values.mlflow.corsAllowedOrigins | quote }}
-            {{- end }}
-            {{- if .Values.mlflow.workspaceLabelSelector }}
+            {{- if .Values.artifactsServer.workspaceLabelSelector }}
             - name: MLFLOW_K8S_WORKSPACE_LABEL_SELECTOR
-              value: {{ .Values.mlflow.workspaceLabelSelector | quote }}
+              value: {{ .Values.artifactsServer.workspaceLabelSelector | quote }}
             {{- end }}
             {{- range .Values.env }}
+            {{- if ne .name "MLFLOW_SERVER_ENABLE_JOB_EXECUTION" }}
             - name: {{ .name }}
               {{- if .valueFrom }}
               valueFrom:
@@ -228,6 +150,10 @@ spec:
               value: {{ .value | quote }}
               {{- end }}
             {{- end }}
+            {{- end }}
+            # The second metadata-aware server must never run duplicate background jobs.
+            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+              value: "false"
             - name: MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE
               value: "false"
             {{- include "mlflow.caBundleEnv" . | nindent 12 }}
@@ -237,31 +163,20 @@ spec:
           {{- end }}
           ports:
             - name: https
-              containerPort: {{ .Values.mlflow.port }}
+              containerPort: {{ .Values.artifactsServer.port }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            {{- if $trackingMountsStorage }}
+            {{- if $artifactsMountStorage }}
             - name: mlflow-storage
               mountPath: /mlflow
             {{- end }}
-            - name: mlflow-tls
+            - name: mlflow-artifacts-tls
               mountPath: /etc/tls/private
               readOnly: true
             {{- if .Values.caBundle.configMaps }}
-            # Combined CA bundle - includes system CAs + platform CAs + custom CAs
-            # Created by the init container, used by all Python libraries
             - name: combined-ca-bundle
               mountPath: {{ dir .Values.caBundle.outputPath }}
-              readOnly: true
-            {{- end }}
-            {{- if .Values.metrics.enabled }}
-            - name: metrics
-              mountPath: /prometheus
-            {{- end }}
-            {{- if .Values.traceArchival.enabled }}
-            - name: trace-archival-config
-              mountPath: /etc/mlflow
               readOnly: true
             {{- end }}
           livenessProbe:
@@ -288,13 +203,12 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.resources }}
+          {{- with (.Values.artifactsServer.resources | default (omit .Values.resources "claims")) }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 
         {{- if .Values.caBundle.configMaps }}
-        # Sidecar that watches for CA bundle ConfigMap changes and regenerates the combined bundle
         - name: ca-bundle-watcher
           image: {{ .Values.image.name }}
           {{- if .Values.image.imagePullPolicy }}
@@ -306,25 +220,13 @@ spec:
             - |
 {{ include "mlflow.caBundleFunctions" . | indent 14 }}
 
-              # Watch loop
               LAST_CHECKSUM=$(compute_checksum)
-              echo "CA bundle watcher started"
-              echo "  File paths: $CA_BUNDLE_FILE_PATHS"
-              echo "  Mount paths: $CA_BUNDLE_MOUNT_PATHS"
-              echo "  Output: $CA_BUNDLE_OUTPUT"
-              echo "  Watch interval: ${CA_BUNDLE_WATCH_INTERVAL}s"
-              echo "  Initial checksum: $LAST_CHECKSUM"
-
               while true; do
                 sleep "$CA_BUNDLE_WATCH_INTERVAL"
                 CURRENT_CHECKSUM=$(compute_checksum)
                 if [ "$CURRENT_CHECKSUM" != "$LAST_CHECKSUM" ]; then
-                  echo "CA bundle change detected (checksum: $LAST_CHECKSUM -> $CURRENT_CHECKSUM)"
                   if combine_ca_bundles; then
                     LAST_CHECKSUM="$CURRENT_CHECKSUM"
-                    echo "Combined CA bundle updated successfully"
-                  else
-                    echo "ERROR: Failed to regenerate combined CA bundle"
                   fi
                 fi
               done
@@ -359,3 +261,4 @@ spec:
               cpu: 50m
               memory: 32Mi
         {{- end }}
+{{- end }}

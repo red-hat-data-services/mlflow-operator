@@ -39,6 +39,15 @@ from .artifact_validations import (
 from .trace_validations import (
     validate_trace_logged,
 )
+from .trace_archival_validations import (
+    validate_archival_smoke_ready,
+    validate_archival_experiment_created,
+    validate_archival_traces_visible,
+    validate_archival_traces_db_backed,
+    validate_archival_job_completed,
+    validate_archive_objects_written,
+    validate_archival_traces_readable,
+)
 from .validation_utils import (
     validate_authentication_denied,
     validate_authentication_denied_or_resource_not_found,
@@ -73,6 +82,13 @@ __all__ = [
     "validate_run_created",
     "validate_run_ended",
     "validate_trace_logged",
+    "validate_archival_smoke_ready",
+    "validate_archival_experiment_created",
+    "validate_archival_traces_visible",
+    "validate_archival_traces_db_backed",
+    "validate_archival_job_completed",
+    "validate_archive_objects_written",
+    "validate_archival_traces_readable",
     "validate_authentication_denied",
     "validate_authentication_denied_or_resource_not_found",
     "validate_resource_retrieved_or_created",

@@ -16,9 +16,19 @@ limitations under the License.
 
 package controller
 
+const artifactsServerHTTPRouteRequiredMessage = "artifactsServer requires the HTTPRoute API"
+
 const (
 	// ResourceName is the base name used for MLflow resources (deployments, services, etc.)
 	ResourceName = "mlflow"
+	// ArtifactsResourceName is the base name used for dedicated artifact-serving resources.
+	ArtifactsResourceName = "mlflow-artifacts"
+	// ArtifactsProxyAPIPath is the MLflow proxied artifact API family prefix.
+	ArtifactsProxyAPIPath = "/api/2.0/mlflow-artifacts"
+	// ArtifactsAJAXProxyAPIPath is the AJAX alias for the proxied artifact API family.
+	ArtifactsAJAXProxyAPIPath = "/ajax-api/2.0/mlflow-artifacts"
+	// ArtifactsAPIPath is the proxied artifact root advertised to MLflow clients.
+	ArtifactsAPIPath = ArtifactsProxyAPIPath + "/artifacts"
 	// ClusterRoleName is the name of the shared ClusterRole used by all MLflow instances
 	ClusterRoleName = "mlflow"
 	// ClusterRoleBindingName is the name of the shared ClusterRoleBinding used by all MLflow instances
@@ -33,6 +43,8 @@ const (
 	TraceArchivalServiceAccountName = "mlflow-trace-archival-sa"
 	// TLSSecretName is the default name for the TLS secret used by the MLflow server
 	TLSSecretName = "mlflow-tls"
+	// ArtifactsTLSSecretName is the TLS secret used by the dedicated artifact server.
+	ArtifactsTLSSecretName = "mlflow-artifacts-tls"
 	// StaticPrefix is the URL prefix for MLflow when deployed via the operator
 	StaticPrefix = "/mlflow"
 

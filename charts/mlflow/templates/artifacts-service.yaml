@@ -1,24 +1,25 @@
+{{- if .Values.artifactsServer.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: mlflow{{ .Values.resourceSuffix }}
+  name: mlflow-artifacts{{ .Values.resourceSuffix }}
   namespace: {{ .Values.namespace }}
   labels:
     app: mlflow{{ .Values.resourceSuffix }}
-    app.kubernetes.io/component: tracking-server
     {{- with .Values.commonLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.service.annotations }}
+  {{- with .Values.artifactsServer.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   selector:
-    app: mlflow{{ .Values.resourceSuffix }}
+    app: mlflow-artifacts{{ .Values.resourceSuffix }}
   ports:
     - name: https
       protocol: TCP
-      port: {{ .Values.service.port }}
+      port: {{ .Values.artifactsServer.service.port }}
       targetPort: https
-  type: {{ .Values.service.type }}
+  type: {{ .Values.artifactsServer.service.type }}
+{{- end }}

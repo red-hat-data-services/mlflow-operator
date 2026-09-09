@@ -67,6 +67,10 @@ The framework supports configuration via environment variables:
 | `DISABLE_TLS` | Disable TLS verification | `true` | Both |
 | `artifact_storage` | Artifact storage type (`s3` or `file`) | `file` | Both |
 | `serve_artifacts` | Whether MLflow serves artifacts | `true` | Both |
+| `artifacts_server` | Whether the dedicated artifact-server integration topology is deployed | `false` | K8s |
+| `artifacts_server_gateway` | Whether live Gateway rewrite assertions are enabled | `false` | K8s |
+| `MLFLOW_ARTIFACTS_URI` | Direct artifact-server base URI set by the harness | `""` | K8s |
+| `mlflow_namespace` | Namespace containing the MLflow Deployments | `opendatahub` | K8s |
 | `MLFLOW_S3_ENDPOINT_URL` | S3 endpoint URL | Optional | Both |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 | Optional | Both |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 | Optional | Both |
@@ -92,6 +96,7 @@ uv run pytest tests/test_experiments.py
 uv run pytest tests/test_models.py
 uv run pytest tests/test_traces.py
 uv run pytest tests/test_artifacts.py
+uv run pytest tests/test_trace_archival.py
 
 # Run with specific markers
 uv run pytest -m Experiments    # Experiment RBAC tests
@@ -109,6 +114,45 @@ uv run pytest --log-cli-level=INFO
 # Run specific test scenario
 uv run pytest tests/test_experiments.py -k "GET permission can get experiment"
 ```
+
+The operator GitHub workflow includes independent `ARTIFACTS_SERVER=true` PostgreSQL/file and
+PostgreSQL/S3 Kind rows. They install the repository's pinned `HTTPRoute` CRD before operator
+startup, provide the artifact TLS Secret, and port-forward the `mlflow-artifacts` Service. Both
+direct smoke tests cover workspace authentication, upload, listing, and download; the S3 row also
+covers multipart create/abort. A Gateway controller is not required.
+
+When invoking `images/test-run.sh` directly on Kind, install the CRD before the operator starts (or
+restart the operator after installation):
+
+```bash
+kubectl apply -f ../test/crd/httproutes.gateway.networking.k8s.io.yaml
+ARTIFACTS_SERVER=true \
+ARTIFACT_BACKENDS=file \
+BACKEND_STORE=postgres \
+REGISTRY_STORE=postgres \
+INFRASTRUCTURE_PLATFORM=base \
+bash images/test-run.sh -m "smoke and artifacts_server"
+```
+
+Set `ARTIFACT_BACKENDS=s3` for multipart coverage or `ARTIFACT_BACKENDS=file,s3` for a normal
+sequential run across both destinations. Upgrade phases and `SKIP_CLEANUP=true` require one backend.
+
+On OpenShift, enable the independent live Gateway rewrite assertions when the operator has the
+external `MLFLOW_URL` and `data-science-gateway` configured:
+
+```bash
+ARTIFACTS_SERVER=true \
+ARTIFACTS_SERVER_GATEWAY=true \
+ARTIFACT_BACKENDS=s3 \
+BACKEND_STORE=postgres \
+REGISTRY_STORE=postgres \
+INFRASTRUCTURE_PLATFORM=openshift \
+bash images/test-run.sh -m "smoke and artifacts_server"
+```
+
+The Gateway smoke test calls the UI list/download compatibility paths and multipart create/abort
+through the legacy tracking-relative proxy path, then verifies from access logs that the Gateway
+sent every request to the `mlflow-artifacts` Deployment.
 
 ### Running Upgrade Phase Tests
 
@@ -138,7 +182,7 @@ upgrade_test_workspace=mlflow-upgrade-test-workspace \
 uv run pytest tests/upgrade/post_upgrade/test_3_10.py -m post_upgrade
 ```
 
-`bash images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` if it is unset. The test image also bakes the normalized value into `BASH_ENV` so direct image execution paths can rely on the same default without reimplementing the lookup. Harness-driven upgrade runs use `upgrade_test_workspace` for workspace creation and RBAC, default to `ARTIFACT_BACKENDS=file` when no backend is set, and require exactly one backend for `pre_upgrade`, `post_upgrade`, or `SKIP_CLEANUP=true`. For normal current-version multi-backend runs, the harness now tears down the `MLflow` CR and any self-managed PostgreSQL / SeaweedFS resources between backend suites so later suites start from a clean backend state. For `post_upgrade`, the harness also waits for the MLflow health endpoint and the `MLflow` CR `status.version` to reach the current supported version before pytest starts. A missing `mlflow-upgrade-test-version` ConfigMap still means "no matching post-upgrade dataset for this source version" and now exits cleanly as a successful skip, while a present ConfigMap with empty or invalid handoff data still fails the run.
+`bash images/test-run.sh` derives `MLFLOW_TEST_SUPPORTED_VERSION` if it is unset. The test image also bakes the normalized value into `BASH_ENV` so direct image execution paths can rely on the same default without reimplementing the lookup. Harness-driven upgrade runs use `upgrade_test_workspace` for workspace creation and RBAC, default to `ARTIFACT_BACKENDS=file` when no backend is set, and require exactly one backend for `pre_upgrade`, `post_upgrade`, or `SKIP_CLEANUP=true`. For normal current-version multi-backend runs, the harness now tears down the `MLflow` CR and any self-managed PostgreSQL / SeaweedFS resources between backend suites so later suites start from a clean backend state. It also deletes that cluster-scoped `MLflow` CR after the last suite, including when pytest fails, so a leftover instance cannot block later `MLflowOperator` removal. For `post_upgrade`, the harness also waits for the MLflow health endpoint and the `MLflow` CR `status.version` to reach the current supported version before pytest starts. A missing `mlflow-upgrade-test-version` ConfigMap still means "no matching post-upgrade dataset for this source version" and now exits cleanly as a successful skip, while a present ConfigMap with empty or invalid handoff data still fails the run.
 
 The upgrade datasets use fixed resource names in a fixed namespace. If a local `pre_upgrade` run is interrupted or you want to reseed from scratch, delete the static namespace and the `mlflow-upgrade-test-version` ConfigMap before rerunning, or use a fresh cluster.
 
@@ -170,7 +214,8 @@ The framework defines the following custom pytest markers:
 - **`@pytest.mark.Models`**: Test registered model RBAC and management operations
 - **`@pytest.mark.Traces`**: Test direct trace-ingestion RBAC and experiment-scoped trace authorization
 - **`@pytest.mark.Artifacts`**: Test artifact operations, model logging, and S3 storage verification
-- **`@pytest.mark.smoke`**: Fast sanity-check tests suitable for pre-merge smoke runs
+- **`@pytest.mark.artifacts_server`**: Test direct dedicated artifact functionality and, when enabled, live Gateway rewrites
+- **`@pytest.mark.smoke`**: Fast sanity-check tests suitable for pre-merge smoke runs, including trace archival in S3 rows where both metadata stores use PostgreSQL; that coverage creates several traces, runs the operator CronJob as a one-shot Job, and checks archive-object creation plus post-archive readability with `SPANS_LOCATION=ARCHIVE_REPO`. S3 rows involving SQLite skip this case because the harness provisions their shared PVC as `ReadWriteOnce`.
 - **`@pytest.mark.pre_upgrade`**: Seed static MLflow state for upgrade validation
 - **`@pytest.mark.post_upgrade`**: Validate static MLflow state after an upgrade
 
@@ -233,6 +278,7 @@ Tests use specific Kubernetes verbs for granular permission control:
 - **Experiment Operations**: Create, read, delete experiments with RBAC validation
 - **Model Management**: Registered model lifecycle with permission enforcement
 - **Trace Logging**: Agent-style trace emission with experiment-scoped `get`/`update` and `resourceNames` validation
+- **Trace Archival**: Smoke coverage creates several traces, waits past `TRACE_ARCHIVAL_RETENTION`, runs a Job from `mlflow-trace-archival` on object storage (`artifact_storage=s3`), then verifies archive-object creation and post-archive trace readability; skipped for file storage
 - **Artifact Storage**: S3 integration testing for model artifacts and logging operations
 - **Cross-Workspace Security**: Validates users cannot access resources in other workspaces
 - **Permission Matrix**: Tests all role levels against all operations (success and failure scenarios)

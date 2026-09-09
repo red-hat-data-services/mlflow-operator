@@ -46,6 +46,8 @@ class TestContext:
         expected_artifact_path: Expected relative path within bucket for custom artifacts
         mlflowconfigs_to_delete: Map of mlflowconfig_name -> namespace for cleanup
         secrets_to_delete: Map of secret_name -> namespace for cleanup
+        jobs_to_delete: Map of job_name -> namespace for cleanup
+        archival_state: Scratch state for the live trace-archival smoke path
     """
 
     workspaces: list[str] = field(default_factory=list)
@@ -83,6 +85,8 @@ class TestContext:
     expected_artifact_path: Optional[str] = None
     mlflowconfigs_to_delete: dict[str, str] = field(default_factory=dict)
     secrets_to_delete: dict[str, str] = field(default_factory=dict)
+    jobs_to_delete: dict[str, str] = field(default_factory=dict)
+    archival_state: dict[str, Any] = field(default_factory=dict)
     upgrade_state: dict[str, Any] = field(default_factory=dict)
     upgrade_observed_state: dict[str, Any] = field(default_factory=dict)
     k8_manager: Optional["K8Manager"] = None
@@ -233,6 +237,26 @@ class TestContext:
 
         self.secrets_to_delete[name.strip()] = namespace.strip()
         logger.info(f"Added Secret {name} in namespace '{namespace}' to cleanup list")
+
+    def add_job_for_cleanup(self, name: str, namespace: str) -> None:
+        """Add a Kubernetes Job to the cleanup list.
+
+        Args:
+            name: Name of the Job
+            namespace: Namespace where the Job exists
+
+        Raises:
+            ValueError: If name or namespace is empty
+        """
+        if not name or not name.strip():
+            logger.error("Attempted to add Job for cleanup with empty name")
+            raise ValueError("name cannot be empty")
+        if not namespace or not namespace.strip():
+            logger.error(f"Attempted to add Job {name} for cleanup with empty namespace")
+            raise ValueError("namespace cannot be empty")
+
+        self.jobs_to_delete[name.strip()] = namespace.strip()
+        logger.info(f"Added Job {name} in namespace '{namespace}' to cleanup list")
 
     def add_namespace_for_cleanup(self, name: str) -> None:
         """Add a Kubernetes namespace to the cleanup list.

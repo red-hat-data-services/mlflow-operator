@@ -103,7 +103,7 @@ The script is configured entirely via environment variables. Variables can also 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STORAGE_TYPE` | `file` | Artifact storage backend. Supported: `file`, `s3`. |
+| `STORAGE_TYPE` | `file` | Legacy single artifact storage backend. Supported: `file`, `s3`, `externals3`. Prefer `ARTIFACT_BACKENDS`. |
 | `BACKEND_STORE` | `sqlite` | Backend store type. Supported: `sqlite`, `postgres`. |
 | `REGISTRY_STORE` | `sqlite` | Registry store type. Supported: `sqlite`, `postgres`. |
 | `AWS_ACCESS_KEY_ID` | _(unset)_ | S3 access key (`STORAGE_TYPE=s3` only). |
@@ -116,6 +116,16 @@ The script is configured entirely via environment variables. Variables can also 
 | `DB_PASSWORD` | _(unset)_ | PostgreSQL password. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
 | `DB_NAME` | `mydatabase` | PostgreSQL database name. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
 | `DB_SSLMODE` | _(unset)_ | SSL mode for the PostgreSQL connection URI. |
+
+For the self-deployed `s3` backend, the MLflow pod uses the Kubernetes
+`minio-service.<namespace>.svc.cluster.local:9000` endpoint. The integration
+launcher preserves that endpoint in generated presigned URLs and maps that
+hostname to the runner's localhost SeaweedFS port-forward in the
+host-networked test container. When SeaweedFS TLS is enabled, the harness also
+extracts all `.crt` and `.pem` entries from the configured CA ConfigMap and
+configures the test clients to trust them. This lets multipart downloads reach
+SeaweedFS without changing the in-cluster endpoint used by MLflow or disabling
+certificate verification.
 
 ### Infrastructure image overrides
 
@@ -134,15 +144,17 @@ The script is configured entirely via environment variables. Variables can also 
 | `MLFLOW_OPERATOR_BRANCH` | `main` | Branch to pull manifests from for CSV patching. |
 | `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `base` or `openshift`. When unset, the harness inspects `route.openshift.io` and selects `openshift` only if route resources are actually present; otherwise it uses `base`. |
 | `FORCE_PORT_FORWARD` | `false` | Force the harness to port-forward the MLflow service to `localhost:8443` even on OpenShift, instead of using the MLflow CR `status.url`. |
+| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Normal runs may use multiple backends; generic Kubernetes uses a direct Service port-forward on `localhost:8444`. |
+| `ARTIFACTS_SERVER_GATEWAY` | `false` | Also require live OpenShift Gateway acceptance and run tracking-relative rewrite assertions. |
 
 ### Skip / control flags
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SKIP_DEPLOYMENT` | `false` | Skip all cluster deployment (use pre-existing resources). |
+| `SKIP_DEPLOYMENT` | `false` | Skip all cluster deployment and use pre-existing resources. Requires exactly one backend matching the reused MLflow CR. |
 | `SKIP_OPERATOR` | `false` | Skip operator deployment only. |
 | `SKIP_INFRASTRUCTURE` | `false` | Skip PostgreSQL/SeaweedFS deployment. |
-| `SKIP_CLEANUP` | `false` | Leave the deployment in place after the run. Requires exactly one backend; use it for inspection or later reuse. |
+| `SKIP_CLEANUP` | `false` | Leave the deployment in place after the run. By default, failure diagnostics are collected before the harness deletes its cluster-scoped MLflow CR after every suite, including the final suite and interrupted runs. Requires exactly one backend; use it for inspection or later reuse. |
 | `CLEANUP_REUSED_RESOURCES` | `false` | With `SKIP_DEPLOYMENT=true` and `SKIP_CLEANUP=false`, control cleanup of reused resources: `false` preserves them, `true` always deletes them, and `on_success` deletes them only after a successful run. |
 
 ### Other
@@ -167,6 +179,18 @@ Uses SQLite for metadata and a local PVC for artifacts. Suitable for quick local
 STORAGE_TYPE=file BACKEND_STORE=sqlite REGISTRY_STORE=sqlite bash images/test-run.sh
 ```
 
+Dedicated split serving keeps file artifacts on the PVC but requires remote SQL metadata:
+
+```bash
+ARTIFACTS_SERVER=true ARTIFACT_BACKENDS=file \
+  BACKEND_STORE=postgres REGISTRY_STORE=postgres \
+  bash images/test-run.sh -m "smoke and artifacts_server"
+```
+
+The common split-serving smoke checks cover upload, list, and download for file and S3-compatible
+destinations. Multipart create/abort checks run only for S3-compatible storage. Normal runs may set
+`ARTIFACT_BACKENDS=file,s3`; upgrade phases and `SKIP_CLEANUP=true` remain single-backend flows.
+
 ### S3 artifact storage
 
 Requires `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `BUCKET`, and `S3_ENDPOINT_URL` to be set.
@@ -175,6 +199,16 @@ Requires `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `BUCKET`, and `S3_ENDPOIN
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... BUCKET=my-bucket S3_ENDPOINT_URL=https://... \
   STORAGE_TYPE=s3 bash images/test-run.sh
 ```
+
+`deploy.py` enables `spec.traceArchival` automatically only for `s3` or `externals3` when both the backend and registry stores use PostgreSQL (same bucket, `/trace-archive` prefix, schedule `0 0 1 1 *` so the CronJob does not fire during CI). Harness-driven runs default `TRACE_ARCHIVAL_RETENTION=1m` and pass that through to the MLflow CR so the smoke suite can create several traces, persist them as DB-backed spans via OTLP `/v1/traces` (prefixed tracking URI first, then the unprefixed Kind port-forward path), run a Job from the CronJob template, and verify that archive objects appear, traces remain readable, and `SPANS_LOCATION=ARCHIVE_REPO`. S3 rows involving SQLite retain their `ReadWriteOnce` PVC and omit trace archival; the smoke test reads the deployed CR and skips when archival is not enabled.
+
+For dedicated artifact serving, the Kind CI launcher installs the pinned `HTTPRoute` CRD before the
+operator starts and the harness port-forwards `mlflow-artifacts` for direct workspace-authenticated
+upload, list, download, and multipart smoke coverage. Set `ARTIFACTS_SERVER_GATEWAY=true` only on
+OpenShift with a working data science Gateway to additionally validate route acceptance and rewrites.
+Direct local `test-run.sh` invocations on Kind must apply
+`test/crd/httproutes.gateway.networking.k8s.io.yaml` before operator startup; unlike the CI launcher,
+`test-run.sh` does not install cluster CRDs.
 
 ### PostgreSQL metadata store
 

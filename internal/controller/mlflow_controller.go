@@ -60,6 +60,7 @@ const (
 // MLflowReconciler reconciles a MLflow object
 type MLflowReconciler struct {
 	client.Client
+	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
 	Namespace               string
 	ChartPath               string
@@ -67,6 +68,7 @@ type MLflowReconciler struct {
 	HTTPRouteAvailable      bool
 	ServiceMonitorAvailable bool
 	GCRBACWatchCache        crcache.Cache
+	baseConfig              *config.OperatorConfig
 }
 
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows,verbs=get;list;watch;create;update;patch;delete
@@ -74,6 +76,8 @@ type MLflowReconciler struct {
 // +kubebuilder:rbac:groups=mlflow.opendatahub.io,resources=mlflows/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,resourceNames=mlflow-artifact-connection,verbs=get;list;watch
 // +kubebuilder:rbac:groups=mlflow.kubeflow.org,resources=mlflowconfigs,verbs=get;list;watch
+// Required to create and update the GC ClusterRole without RBAC escalation.
+// +kubebuilder:rbac:groups=mlflow.kubeflow.org,resources=experiments,verbs=get;list;update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // Shared server RBAC objects are statically named `mlflow` and watched through metadata.name
 // field selectors so list/watch remains compatible with resourceNames-scoped authorization.
@@ -130,6 +134,40 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	targetNamespace := cfg.ApplicationsNamespace
 	mlflow.Status.Address = buildStatusAddress(mlflow.Name, targetNamespace)
+	if isArtifactsServerEnabled(mlflow) && !r.HTTPRouteAvailable {
+		err := fmt.Errorf("%s", artifactsServerHTTPRouteRequiredMessage)
+		setObservedURLs(mlflow, targetNamespace, false, cfg)
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Available",
+			Status:  metav1.ConditionFalse,
+			Reason:  "HttpRouteFailed",
+			Message: fmt.Sprintf("Failed to reconcile artifacts HTTPRoute: %v", err),
+		})
+		if statusErr := r.updateStatus(ctx, mlflow); statusErr != nil {
+			log.Error(statusErr, "Failed to update MLflow status after HTTPRoute prerequisite check")
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.validateArtifactsServerMetadataStores(ctx, mlflow, targetNamespace); err != nil {
+		setObservedURLs(mlflow, targetNamespace, false, cfg)
+		log.Error(err, "Failed to validate artifacts server metadata stores")
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Available",
+			Status:  metav1.ConditionFalse,
+			Reason:  "MetadataStoreValidationFailed",
+			Message: err.Error(),
+		})
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Progressing",
+			Status:  metav1.ConditionFalse,
+			Reason:  "MetadataStoreValidationFailed",
+			Message: err.Error(),
+		})
+		if statusErr := r.updateStatus(ctx, mlflow); statusErr != nil {
+			log.Error(statusErr, "Failed to update MLflow status after metadata store validation")
+		}
+		return ctrl.Result{}, err
+	}
 
 	// Clean up GC resources when garbage collection is disabled.
 	if mlflow.Spec.GarbageCollection == nil {
@@ -185,6 +223,47 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 				return ctrl.Result{}, err
 			}
 			log.Info("Deleted trace archival resource", "kind", res.kind, "name", res.name)
+		}
+	}
+
+	// Keep a disabling artifact Deployment available for migration quiescence; remove it after
+	// the migration and post-migration tracking rollout have completed.
+	if !isArtifactsServerEnabled(mlflow) && !migrationRequested(mlflow) {
+		resourceName := ArtifactsResourceName + getResourceSuffix(mlflow.Name)
+		artifactResources := []struct {
+			obj  client.Object
+			kind string
+		}{
+			{&appsv1.Deployment{}, "Deployment"},
+			{&corev1.Service{}, "Service"},
+			{&gatewayv1.HTTPRoute{}, "HTTPRoute"},
+		}
+		for _, res := range artifactResources {
+			key := types.NamespacedName{Name: resourceName, Namespace: targetNamespace}
+			reader := client.Reader(r.Client)
+			if res.kind == "HTTPRoute" && !r.HTTPRouteAvailable && r.APIReader != nil {
+				reader = r.APIReader
+			}
+			if err := reader.Get(ctx, key, res.obj); err != nil {
+				if errors.IsNotFound(err) || meta.IsNoMatchError(err) {
+					continue
+				}
+				return ctrl.Result{}, err
+			}
+			if !metav1.IsControlledBy(res.obj, mlflow) {
+				log.V(1).Info("Skipping deletion of unowned artifact server resource", "kind", res.kind, "name", resourceName)
+				continue
+			}
+			uid := res.obj.GetUID()
+			resourceVersion := res.obj.GetResourceVersion()
+			deleteOpts := &client.DeleteOptions{
+				Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion},
+			}
+			if err := r.Delete(ctx, res.obj, deleteOpts); err != nil &&
+				!errors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+				log.Error(err, "Failed to delete artifact server resource", "kind", res.kind, "name", resourceName)
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -247,6 +326,12 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("%s", msg)
 	}
 
+	secretResourceVersions, err := r.referencedSecretResourceVersions(ctx, mlflow, targetNamespace)
+	if err != nil {
+		log.Error(err, "Failed to read referenced Secret resource versions")
+		return ctrl.Result{}, err
+	}
+
 	// Render the Helm chart
 	helmChartPath := r.ChartPath
 	if helmChartPath == "" {
@@ -256,8 +341,9 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	renderOpts := RenderOptions{
 		PlatformTrustedCABundleExists: platformCABundleExists,
 		// If ConsoleLink is available, we can assume we are on OpenShift
-		IsOpenShift:             r.ConsoleLinkAvailable,
-		ServiceMonitorAvailable: r.ServiceMonitorAvailable,
+		IsOpenShift:                      r.ConsoleLinkAvailable,
+		ServiceMonitorAvailable:          r.ServiceMonitorAvailable,
+		ReferencedSecretResourceVersions: secretResourceVersions,
 	}
 	objects, err := renderer.RenderChart(mlflow, targetNamespace, renderOpts, cfg)
 	if err != nil {
@@ -340,35 +426,62 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		return ctrl.Result{}, err
 	}
+	if err := r.reconcileArtifactsHTTPRoute(ctx, mlflow, targetNamespace, cfg); err != nil {
+		setObservedURLs(mlflow, targetNamespace, false, cfg)
+		log.Error(err, "Failed to reconcile artifacts HTTPRoute")
+		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
+			Type:    "Available",
+			Status:  metav1.ConditionFalse,
+			Reason:  "HttpRouteFailed",
+			Message: fmt.Sprintf("Failed to reconcile artifacts HTTPRoute: %v", err),
+		})
+		if statusErr := r.updateStatus(ctx, mlflow); statusErr != nil {
+			log.Error(statusErr, "Failed to update MLflow status after retries")
+		}
+		return ctrl.Result{}, err
+	}
 
 	setObservedURLs(mlflow, targetNamespace, r.HTTPRouteAvailable, cfg)
 
-	// Get deployment name using the resource suffix
-	deploymentName := ResourceName + getResourceSuffix(mlflow.Name)
-
-	// Check deployment readiness
-	deployment := &appsv1.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: targetNamespace}, deployment)
-	if err != nil {
-		if !errors.IsNotFound(err) {
-			log.Error(err, "Failed to get Deployment")
-			return ctrl.Result{}, err
+	deploymentNames := []string{ResourceName + getResourceSuffix(mlflow.Name)}
+	if isArtifactsServerEnabled(mlflow) {
+		deploymentNames = append(deploymentNames, ArtifactsResourceName+getResourceSuffix(mlflow.Name))
+	}
+	allDeploymentsReady := true
+	notReadyMessage := ""
+	for _, deploymentName := range deploymentNames {
+		deployment := &appsv1.Deployment{}
+		err = r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: targetNamespace}, deployment)
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				log.Error(err, "Failed to get Deployment", "name", deploymentName)
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		// Deployment not created yet, requeue
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+
+		desiredReplicas := int32(1)
+		if deployment.Spec.Replicas != nil {
+			desiredReplicas = *deployment.Spec.Replicas
+		}
+		if desiredReplicas <= 0 {
+			allDeploymentsReady = false
+			notReadyMessage = fmt.Sprintf("Deployment %s scaled to zero replicas", deploymentName)
+			break
+		}
+		if deployment.Status.ReadyReplicas < desiredReplicas {
+			allDeploymentsReady = false
+			notReadyMessage = fmt.Sprintf(
+				"Deployment %s not ready: %d/%d replicas ready",
+				deploymentName,
+				deployment.Status.ReadyReplicas,
+				desiredReplicas,
+			)
+			break
+		}
 	}
 
-	// Check if deployment is ready
-	// Get desired replica count from deployment spec
-	desiredReplicas := int32(1)
-	if deployment.Spec.Replicas != nil {
-		desiredReplicas = *deployment.Spec.Replicas
-	}
-
-	// Only mark as ready if:
-	// 1. Desired replicas > 0 (not scaled down)
-	// 2. All desired replicas are ready
-	if desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas {
+	if allDeploymentsReady {
 		migrationJob := &batchv1.Job{}
 		jobErr := r.Get(ctx, types.NamespacedName{Name: migrationJobName(mlflow), Namespace: targetNamespace}, migrationJob)
 		switch {
@@ -382,12 +495,15 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			return ctrl.Result{}, jobErr
 		}
 
-		// Deployment is ready
+		readyMessage := "MLflow deployment is ready and available"
+		if isArtifactsServerEnabled(mlflow) {
+			readyMessage = "MLflow tracking and artifact deployments are ready and available"
+		}
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
 			Type:    "Available",
 			Status:  metav1.ConditionTrue,
 			Reason:  "DeploymentReady",
-			Message: "MLflow deployment is ready and available",
+			Message: readyMessage,
 		})
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
 			Type:    "Progressing",
@@ -396,22 +512,17 @@ func (r *MLflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			Message: "MLflow reconciliation completed successfully",
 		})
 	} else {
-		// Deployment not ready yet
-		message := fmt.Sprintf("MLflow deployment not ready: %d/%d replicas ready", deployment.Status.ReadyReplicas, desiredReplicas)
-		if desiredReplicas == 0 {
-			message = "MLflow deployment scaled to zero replicas"
-		}
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
 			Type:    "Available",
 			Status:  metav1.ConditionFalse,
 			Reason:  "DeploymentNotReady",
-			Message: message,
+			Message: notReadyMessage,
 		})
 		meta.SetStatusCondition(&mlflow.Status.Conditions, metav1.Condition{
 			Type:    "Progressing",
 			Status:  metav1.ConditionTrue,
 			Reason:  "DeploymentProgressing",
-			Message: message,
+			Message: notReadyMessage,
 		})
 		// Keep requeuing until ready
 		if err := r.updateStatus(ctx, mlflow); err != nil {
@@ -464,6 +575,9 @@ func (r *MLflowReconciler) applyObject(ctx context.Context, obj client.Object) e
 func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	log := ctrl.Log.WithName("setup")
 
+	if r.APIReader == nil {
+		return fmt.Errorf("APIReader must be configured")
+	}
 	if r.GCRBACWatchCache == nil {
 		return fmt.Errorf("GCRBACWatchCache must be configured")
 	}
@@ -473,7 +587,6 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
-		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
@@ -493,6 +606,10 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return obj.GetName() == PlatformTrustedCABundleConfigMapName
 			})),
 		)
+	builder = builder.Watches(
+		&corev1.Secret{},
+		handler.EnqueueRequestsFromMapFunc(r.secretToMLflowRequests),
+	)
 	if config.GetConfig().EnableMLflowOperatorModuleController {
 		builder = builder.Watches(
 			&modulev1alpha1.MLflowOperator{},

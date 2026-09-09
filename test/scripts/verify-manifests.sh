@@ -97,6 +97,40 @@ for chart_dir in charts/*/; do
             chart_failed=1
         fi
 
+        TRACE_REMOTE_SECRET_SETS="$SECRETREF_SETS,mlflow.artifactsDestination=s3://bucket/artifacts,traceArchival.enabled=true,traceArchival.schedule=0 0 * * *,traceArchival.location=s3://bucket/trace-archive,traceArchival.retention=1m,storage.enabled=false"
+        echo "  Rendering trace archival with Secret-backed remote metadata and no storage..."
+        if TRACE_REMOTE_SECRET_RENDER=$(helm template test "$chart_dir" --set "$TRACE_REMOTE_SECRET_SETS" 2>&1); then
+            TRACE_ARCHIVAL_CRONJOB_RENDER=$(awk '
+                /# Source: mlflow\/templates\/trace-archival-cronjob.yaml/ { found=1; next }
+                found && /^---$/ { exit }
+                found { print }
+            ' <<< "$TRACE_REMOTE_SECRET_RENDER")
+            if grep -Fq 'name: mlflow-storage' <<< "$TRACE_ARCHIVAL_CRONJOB_RENDER"; then
+                echo -e "  ${RED}✗ Trace archival unexpectedly mounts storage for Secret-backed remote metadata${NC}"
+                chart_failed=1
+            else
+                echo -e "  ${GREEN}✓ Secret-backed remote metadata renders without persistent storage${NC}"
+            fi
+        else
+            echo -e "  ${RED}✗ Secret-backed remote metadata failed to render without persistent storage${NC}"
+            printf '%s\n' "$TRACE_REMOTE_SECRET_RENDER"
+            chart_failed=1
+        fi
+
+        echo "  Rejecting trace archival with Secret-backed metadata and ReadWriteOnce storage..."
+        TRACE_SECRET_RWO_ERROR=$(helm template test "$chart_dir" \
+            --set "$TRACE_REMOTE_SECRET_SETS,storage.enabled=true,storage.accessMode=ReadWriteOnce" 2>&1) && trace_secret_rwo_accepted=1 || trace_secret_rwo_accepted=0
+        if [ "$trace_secret_rwo_accepted" -eq 1 ]; then
+            echo -e "  ${RED}✗ Secret-backed metadata with ReadWriteOnce storage was accepted${NC}"
+            chart_failed=1
+        elif grep -Fq "trace archival with persistent metadata storage requires storage.enabled=true and storage.accessMode=ReadWriteMany" <<< "$TRACE_SECRET_RWO_ERROR"; then
+            echo -e "  ${GREEN}✓ Secret-backed metadata with ReadWriteOnce storage rejected${NC}"
+        else
+            echo -e "  ${RED}✗ Secret-backed metadata with ReadWriteOnce storage returned an unexpected error${NC}"
+            printf '%s\n' "$TRACE_SECRET_RWO_ERROR"
+            chart_failed=1
+        fi
+
         echo "  Rejecting malformed read-replica secret ref..."
         if helm template test "$chart_dir" \
             --set "mlflow.backendStoreUri=sqlite:////mlflow/mlflow.db" \
@@ -105,6 +139,122 @@ for chart_dir in charts/*/; do
             chart_failed=1
         else
             echo -e "  ${GREEN}✓ Malformed read-replica secret ref rejected${NC}"
+        fi
+
+        echo "  Rendering dedicated metadata-aware artifact server..."
+        ARTIFACT_SERVER_SETS="mlflow.backendStoreUri=postgresql://db/mlflow,mlflow.serveArtifacts=false,artifactsServer.enabled=true,artifactsServer.artifactsDestination=s3://bucket/artifacts,artifactsServer.artifactRoot=https://mlflow.example.com/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts"
+        if ARTIFACT_SERVER_RENDER=$(helm template test "$chart_dir" --set "$ARTIFACT_SERVER_SETS" 2>&1); then
+            echo -e "  ${GREEN}✓ Dedicated artifact server renders successfully${NC}"
+            ARTIFACT_DEPLOYMENT_RENDER=$(awk '
+                /# Source: mlflow\/templates\/artifacts-deployment.yaml/ { found=1; next }
+                found && /^---$/ { exit }
+                found { print }
+            ' <<< "$ARTIFACT_SERVER_RENDER")
+            if awk '
+                /^[[:space:]]*- --allowed-hosts$/ {
+                    getline
+                    if ($0 ~ /^[[:space:]]*- "\*"$/) found=1
+                }
+                END { exit !found }
+            ' <<< "$ARTIFACT_DEPLOYMENT_RENDER"; then
+                echo -e "  ${GREEN}✓ Artifact server accepts Gateway Host headers by default${NC}"
+            else
+                echo -e "  ${RED}✗ Artifact server is missing the default wildcard allowed-hosts argument${NC}"
+                chart_failed=1
+            fi
+        else
+            echo -e "  ${RED}✗ Dedicated artifact server failed to render${NC}"
+            printf '%s\n' "$ARTIFACT_SERVER_RENDER"
+            chart_failed=1
+        fi
+
+        echo "  Rejecting artifact server without an advertised artifact root..."
+        if helm template test "$chart_dir" \
+            --set "mlflow.backendStoreUri=postgresql://db/mlflow" \
+            --set "mlflow.serveArtifacts=false" \
+            --set "artifactsServer.enabled=true" > /dev/null 2>&1; then
+            echo -e "  ${RED}✗ Artifact server without artifactRoot was accepted${NC}"
+            chart_failed=1
+        else
+            echo -e "  ${GREEN}✓ Missing artifactRoot rejected${NC}"
+        fi
+
+        echo "  Rejecting artifact server without an artifact destination..."
+        DESTINATION_ERROR=$(helm template test "$chart_dir" \
+            --set "mlflow.backendStoreUri=postgresql://db/mlflow" \
+            --set "mlflow.serveArtifacts=false" \
+            --set "artifactsServer.enabled=true" \
+            --set "artifactsServer.artifactRoot=https://mlflow.example.com/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts" \
+            --set "artifactsServer.artifactsDestination=null" 2>&1) && destination_accepted=1 || destination_accepted=0
+        if [ "$destination_accepted" -eq 1 ]; then
+            echo -e "  ${RED}✗ Artifact server without artifactsDestination was accepted${NC}"
+            chart_failed=1
+        elif grep -q "artifactsServer.artifactsDestination must be set" <<< "$DESTINATION_ERROR"; then
+            echo -e "  ${GREEN}✓ Missing artifactsDestination rejected${NC}"
+        else
+            echo -e "  ${RED}✗ Missing artifactsDestination returned an unexpected error${NC}"
+            printf '%s\n' "$DESTINATION_ERROR"
+            chart_failed=1
+        fi
+
+        echo "  Rejecting simultaneous inline and dedicated artifact serving..."
+        if helm template test "$chart_dir" \
+            --set "mlflow.backendStoreUri=postgresql://db/mlflow" \
+            --set "mlflow.serveArtifacts=true" \
+            --set "artifactsServer.enabled=true" \
+            --set "artifactsServer.artifactRoot=https://mlflow.example.com/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts" > /dev/null 2>&1; then
+            echo -e "  ${RED}✗ Mutually exclusive artifact serving modes were accepted${NC}"
+            chart_failed=1
+        else
+            echo -e "  ${GREEN}✓ Mutually exclusive artifact serving modes rejected${NC}"
+        fi
+
+        FILE_ARTIFACT_SERVER_SETS="mlflow.backendStoreUri=postgresql://db/mlflow,mlflow.serveArtifacts=false,artifactsServer.enabled=true,artifactsServer.artifactsDestination=file:///mlflow/artifacts,artifactsServer.artifactRoot=https://mlflow.example.com/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts,storage.enabled=true"
+        echo "  Rendering one file-backed artifact server replica with ReadWriteOnce storage..."
+        RWO_SETS="$FILE_ARTIFACT_SERVER_SETS,artifactsServer.replicaCount=1,storage.accessMode=ReadWriteOnce"
+        if helm template test "$chart_dir" --set "$RWO_SETS" > /dev/null 2>&1; then
+            echo -e "  ${GREEN}✓ One file-backed replica with ReadWriteOnce storage renders successfully${NC}"
+        else
+            echo -e "  ${RED}✗ One file-backed replica with ReadWriteOnce storage failed to render${NC}"
+            helm template test "$chart_dir" --set "$RWO_SETS" || true
+            chart_failed=1
+        fi
+
+        echo "  Rejecting multiple file-backed artifact server replicas with ReadWriteOnce storage..."
+        MULTI_RWO_SETS="$FILE_ARTIFACT_SERVER_SETS,artifactsServer.replicaCount=2,storage.accessMode=ReadWriteOnce"
+        MULTI_RWO_ERROR=$(helm template test "$chart_dir" --set "$MULTI_RWO_SETS" 2>&1) && multi_rwo_accepted=1 || multi_rwo_accepted=0
+        if [ "$multi_rwo_accepted" -eq 1 ]; then
+            echo -e "  ${RED}✗ Multiple file-backed replicas with ReadWriteOnce storage were accepted${NC}"
+            chart_failed=1
+        elif grep -Fq "multiple file-backed artifact server replicas require storage.accessMode=ReadWriteMany" <<< "$MULTI_RWO_ERROR"; then
+            echo -e "  ${GREEN}✓ Multiple file-backed replicas with ReadWriteOnce storage rejected${NC}"
+        else
+            echo -e "  ${RED}✗ Multiple file-backed replicas with ReadWriteOnce storage returned an unexpected error${NC}"
+            printf '%s\n' "$MULTI_RWO_ERROR"
+            chart_failed=1
+        fi
+
+        echo "  Rendering multiple file-backed artifact server replicas with ReadWriteMany storage..."
+        RWX_SETS="$FILE_ARTIFACT_SERVER_SETS,artifactsServer.replicaCount=2,storage.accessMode=ReadWriteMany"
+        if helm template test "$chart_dir" --set "$RWX_SETS" > /dev/null 2>&1; then
+            echo -e "  ${GREEN}✓ Multiple file-backed replicas with ReadWriteMany storage render successfully${NC}"
+        else
+            echo -e "  ${RED}✗ Multiple file-backed replicas with ReadWriteMany storage failed to render${NC}"
+            helm template test "$chart_dir" --set "$RWX_SETS" || true
+            chart_failed=1
+        fi
+
+        echo "  Rejecting dedicated artifact serving with SQLite metadata..."
+        SQLITE_ERROR=$(helm template test "$chart_dir" --set "$FILE_ARTIFACT_SERVER_SETS,mlflow.backendStoreUri=sqlite:////mlflow/mlflow.db" 2>&1) && sqlite_accepted=1 || sqlite_accepted=0
+        if [ "$sqlite_accepted" -eq 1 ]; then
+            echo -e "  ${RED}✗ Dedicated artifact serving with SQLite was accepted${NC}"
+            chart_failed=1
+        elif grep -Fq "artifactsServer cannot be enabled with inline SQLite metadata stores" <<< "$SQLITE_ERROR"; then
+            echo -e "  ${GREEN}✓ Dedicated artifact serving with SQLite rejected${NC}"
+        else
+            echo -e "  ${RED}✗ Dedicated artifact serving with SQLite returned an unexpected error${NC}"
+            printf '%s\n' "$SQLITE_ERROR"
+            chart_failed=1
         fi
 
         if [ "$chart_failed" -ne 0 ]; then
