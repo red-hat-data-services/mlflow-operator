@@ -1,3 +1,5 @@
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:latest
+
 # Build the manager binary
 FROM registry.access.redhat.com/ubi9/go-toolset:1.26 AS builder
 ARG TARGETOS
@@ -35,7 +37,7 @@ RUN SUPPORTED_MLFLOW_VERSION="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE="${SUPPORTED_M
         go build -ldflags "${GO_LDFLAGS}" -a -o manager cmd/main.go; \
     fi
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+FROM ${BASE_IMAGE}
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/charts/mlflow charts/mlflow

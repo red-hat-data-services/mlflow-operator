@@ -29,6 +29,7 @@ SHELL = /usr/bin/env bash -o pipefail
 
 SUPPORTED_MLFLOW_VERSION := $(shell python3 scripts/print_supported_mlflow_version.py --component-metadata config/component_metadata.yaml)
 SUPPORTED_MLFLOW_VERSION_OVERRIDE ?=
+BASE_IMAGE ?=
 EFFECTIVE_SUPPORTED_MLFLOW_VERSION = $(if $(strip $(SUPPORTED_MLFLOW_VERSION_OVERRIDE)),$(strip $(SUPPORTED_MLFLOW_VERSION_OVERRIDE)),$(strip $(SUPPORTED_MLFLOW_VERSION)))
 SUPPORTED_MLFLOW_VERSION_LDFLAG = -X github.com/opendatahub-io/mlflow-operator/internal/controller.SupportedMLflowVersion=$(EFFECTIVE_SUPPORTED_MLFLOW_VERSION)
 API_MODULE_DIR ?= api
@@ -160,7 +161,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-arg SUPPORTED_MLFLOW_VERSION_OVERRIDE="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE)" -t ${IMG} -f Dockerfile.konflux .
+	$(CONTAINER_TOOL) build $(if $(strip $(BASE_IMAGE)),--build-arg BASE_IMAGE="$(BASE_IMAGE)") --build-arg SUPPORTED_MLFLOW_VERSION_OVERRIDE="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE)" -t ${IMG} -f Dockerfile.konflux .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

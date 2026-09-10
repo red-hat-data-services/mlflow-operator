@@ -23,6 +23,10 @@ env:
   MLFLOW_SEED_OPERATOR_IMAGE: 'quay.io/opendatahub/mlflow-operator@sha256:8b2359c84f4cf325e475c086abbc26c97c4af397f5f5428f9344a64442c28d9f'
   MLFLOW_SEED_SOURCE_IMAGE: 'quay.io/opendatahub/mlflow@sha256:ad51bbd7f770491da88dc1db3b3c84f7471d25c48026ecb385180b63b18f4c64'
   MLFLOW_SEED_IMAGE: 'localhost/mlflow-seed:3.10.1'
+  IS_RHDS_REPOSITORY: ${{ github.repository_owner == 'red-hat-data-services' }}
+  IS_CROSS_REPOSITORY_PR: >-
+    ${{ github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository }}
 
 on:
   push:
@@ -80,11 +84,42 @@ jobs:
             echo "path=mlflow-upstream/Dockerfile" >> "$GITHUB_OUTPUT"
           fi
 
+      # Trusted RHDS runs use the checked-out default after login.
+      # Cross-repository PRs targeting RHDS use ODH's public base image.
+      - name: Resolve public base image
+        id: public-base-image
+        if: env.IS_RHDS_REPOSITORY == 'true' && env.IS_CROSS_REPOSITORY_PR == 'true'
+        uses: ./.github/actions/resolve-base-image
+        with:
+          repository: opendatahub-io/mlflow
+          ref: master
+          dockerfile: Dockerfile.konflux
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Red Hat registry
+        if: env.IS_RHDS_REPOSITORY == 'true' && env.IS_CROSS_REPOSITORY_PR != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: registry.redhat.io
+          username: ${{ secrets.RH_REGISTRY_USERNAME }}
+          password: ${{ secrets.RH_REGISTRY_PASSWORD }}
+
       - name: Build MLflow image archive
         shell: bash
+        env:
+          DOCKERFILE: ${{ steps.resolve-mlflow-dockerfile.outputs.path }}
+          PUBLIC_BASE_IMAGE: ${{ steps.public-base-image.outputs.base_image }}
+          PUBLIC_SOURCE: ${{ steps.public-base-image.outputs.source }}
         run: |
           mkdir -p runtime-image
-          docker build -f "${{ steps.resolve-mlflow-dockerfile.outputs.path }}" -t "${{ env.MLFLOW_RUNTIME_IMAGE }}" mlflow-upstream
+          if [[ -n "$PUBLIC_BASE_IMAGE" ]]; then
+            echo "Overriding BASE_IMAGE with $PUBLIC_BASE_IMAGE"
+            echo "Source: $PUBLIC_SOURCE (canonical fallback)"
+            docker build --build-arg "BASE_IMAGE=$PUBLIC_BASE_IMAGE" \
+              -f "$DOCKERFILE" -t "${{ env.MLFLOW_RUNTIME_IMAGE }}" mlflow-upstream
+          else
+            docker build -f "$DOCKERFILE" -t "${{ env.MLFLOW_RUNTIME_IMAGE }}" mlflow-upstream
+          fi
           docker save -o "runtime-image/${{ env.MLFLOW_RUNTIME_ARTIFACT }}.tar" "${{ env.MLFLOW_RUNTIME_IMAGE }}"
 
       - name: Upload MLflow image artifact
@@ -116,11 +151,40 @@ jobs:
             echo "path=Dockerfile" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve public base image
+        id: public-base-image
+        if: env.IS_RHDS_REPOSITORY == 'true' && env.IS_CROSS_REPOSITORY_PR == 'true'
+        uses: ./.github/actions/resolve-base-image
+        with:
+          repository: opendatahub-io/mlflow-operator
+          ref: main
+          dockerfile: Dockerfile
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Red Hat registry
+        if: env.IS_RHDS_REPOSITORY == 'true' && env.IS_CROSS_REPOSITORY_PR != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: registry.redhat.io
+          username: ${{ secrets.RH_REGISTRY_USERNAME }}
+          password: ${{ secrets.RH_REGISTRY_PASSWORD }}
+
       - name: Build MLflow operator image archive
         shell: bash
+        env:
+          DOCKERFILE: ${{ steps.resolve-operator-dockerfile.outputs.path }}
+          PUBLIC_BASE_IMAGE: ${{ steps.public-base-image.outputs.base_image }}
+          PUBLIC_SOURCE: ${{ steps.public-base-image.outputs.source }}
         run: |
           mkdir -p operator-image
-          docker build -f "${{ steps.resolve-operator-dockerfile.outputs.path }}" -t "${{ env.OPERATOR_RUNTIME_IMAGE }}" .
+          if [[ -n "$PUBLIC_BASE_IMAGE" ]]; then
+            echo "Overriding BASE_IMAGE with $PUBLIC_BASE_IMAGE"
+            echo "Source: $PUBLIC_SOURCE (canonical fallback)"
+            docker build --build-arg "BASE_IMAGE=$PUBLIC_BASE_IMAGE" \
+              -f "$DOCKERFILE" -t "${{ env.OPERATOR_RUNTIME_IMAGE }}" .
+          else
+            docker build -f "$DOCKERFILE" -t "${{ env.OPERATOR_RUNTIME_IMAGE }}" .
+          fi
           docker save -o "operator-image/${{ env.OPERATOR_RUNTIME_ARTIFACT }}.tar" "${{ env.OPERATOR_RUNTIME_IMAGE }}"
 
       - name: Upload MLflow operator image artifact

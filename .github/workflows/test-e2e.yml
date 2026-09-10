@@ -18,6 +18,10 @@ on:
 env:
   IMG: "localhost/mlflow-operator:v0.0.1"
   CLUSTER_NAME: "mlflow"
+  IS_RHDS_REPOSITORY: ${{ github.repository_owner == 'red-hat-data-services' }}
+  IS_CROSS_REPOSITORY_PR: >-
+    ${{ github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository }}
 
 jobs:
   test-e2e:
@@ -31,6 +35,26 @@ jobs:
         with:
           persist-credentials: false
 
+      # Trusted RHDS runs use the checked-out default after login.
+      # Cross-repository PRs targeting RHDS use ODH's public base image.
+      - name: Resolve public base image
+        id: public-base-image
+        if: env.IS_RHDS_REPOSITORY == 'true' && env.IS_CROSS_REPOSITORY_PR == 'true'
+        uses: ./.github/actions/resolve-base-image
+        with:
+          repository: opendatahub-io/mlflow-operator
+          ref: main
+          dockerfile: Dockerfile
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Red Hat registry
+        if: env.IS_RHDS_REPOSITORY == 'true' && env.IS_CROSS_REPOSITORY_PR != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: registry.redhat.io
+          username: ${{ secrets.RH_REGISTRY_USERNAME }}
+          password: ${{ secrets.RH_REGISTRY_PASSWORD }}
+
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -43,7 +67,17 @@ jobs:
           k8s_version: "v1.34.0"
 
       - name: Build operator image
-        run: make docker-build IMG=${{ env.IMG }}
+        env:
+          PUBLIC_BASE_IMAGE: ${{ steps.public-base-image.outputs.base_image }}
+          PUBLIC_SOURCE: ${{ steps.public-base-image.outputs.source }}
+        run: |
+          if [[ -n "$PUBLIC_BASE_IMAGE" ]]; then
+            echo "Overriding BASE_IMAGE with $PUBLIC_BASE_IMAGE"
+            echo "Source: $PUBLIC_SOURCE (canonical fallback)"
+            make docker-build IMG=${{ env.IMG }} BASE_IMAGE="$PUBLIC_BASE_IMAGE"
+          else
+            make docker-build IMG=${{ env.IMG }}
+          fi
 
       - name: Load image into Kind cluster
         run: kind load docker-image ${{ env.IMG }} --name ${{ env.CLUSTER_NAME }}
