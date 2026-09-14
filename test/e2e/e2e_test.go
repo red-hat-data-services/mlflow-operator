@@ -35,14 +35,17 @@ import (
 // namespace where the project is deployed in
 const namespace = "opendatahub"
 
-// serviceAccountName created for the project
-const serviceAccountName = "mlflow-operator-controller-manager"
-
 // metricsServiceName is the name of the metrics service of the project
 const metricsServiceName = "mlflow-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "mlflow-operator-metrics-binding"
+
+const metricsTestNamespace = "opendatahub-monitoring"
+
+const metricsTestServiceAccountName = "mlflow-operator-metrics-test"
+
+const metricsCurlPodName = "curl-metrics"
 
 const dummyRemoteStoreSpec = `apiVersion: mlflow.opendatahub.io/v1
 kind: MLflow
@@ -56,6 +59,7 @@ spec:
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
+	var metricsTestNamespaceCreated bool
 
 	// Before running the tests, set up the environment by creating the namespace,
 	// enforce the restricted security policy to the namespace, installing CRDs,
@@ -71,6 +75,24 @@ var _ = Describe("Manager", Ordered, func() {
 			"pod-security.kubernetes.io/enforce=restricted")
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+		By("creating the monitoring namespace for metrics access")
+		cmd = exec.Command("kubectl", "get", "namespace", metricsTestNamespace)
+		if _, err = utils.Run(cmd); err != nil {
+			cmd = exec.Command("kubectl", "create", "namespace", metricsTestNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create metrics test namespace")
+			metricsTestNamespaceCreated = true
+		}
+
+		By("creating the metrics test service account")
+		cmd = exec.Command("kubectl", "delete", "serviceaccount", metricsTestServiceAccountName,
+			"--namespace", metricsTestNamespace, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "create", "serviceaccount", metricsTestServiceAccountName,
+			"--namespace", metricsTestNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create metrics test service account")
 
 		By("installing CRDs")
 		cmd = exec.Command("make", "install")
@@ -93,7 +115,13 @@ var _ = Describe("Manager", Ordered, func() {
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+		cmd := exec.Command("kubectl", "delete", "pod", metricsCurlPodName,
+			"-n", metricsTestNamespace, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up the metrics test service account")
+		cmd = exec.Command("kubectl", "delete", "serviceaccount", metricsTestServiceAccountName,
+			"-n", metricsTestNamespace, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 
 		By("cleaning up the ClusterRoleBinding for metrics")
@@ -123,6 +151,12 @@ var _ = Describe("Manager", Ordered, func() {
 		By("removing manager namespace")
 		cmd = exec.Command("kubectl", "delete", "ns", namespace)
 		_, _ = utils.Run(cmd)
+
+		if metricsTestNamespaceCreated {
+			By("removing metrics test namespace")
+			cmd = exec.Command("kubectl", "delete", "ns", metricsTestNamespace)
+			_, _ = utils.Run(cmd)
+		}
 	})
 
 	// After each test, check for failures and collect logs, events,
@@ -149,7 +183,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 
 			By("Fetching curl-metrics logs")
-			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+			cmd = exec.Command("kubectl", "logs", metricsCurlPodName, "-n", metricsTestNamespace)
 			metricsOutput, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Metrics logs:\n %s", metricsOutput)
@@ -212,7 +246,7 @@ var _ = Describe("Manager", Ordered, func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd = exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=mlflow-operator-metrics-reader",
-				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
+				fmt.Sprintf("--serviceaccount=%s:%s", metricsTestNamespace, metricsTestServiceAccountName),
 			)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
@@ -223,7 +257,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
 
 			By("getting the service account token")
-			token, err := serviceAccountToken()
+			token, err := serviceAccountToken(metricsTestNamespace, metricsTestServiceAccountName)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(token).NotTo(BeEmpty())
 
@@ -250,12 +284,13 @@ var _ = Describe("Manager", Ordered, func() {
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("cleaning up any existing curl-metrics pod")
-			cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+			cmd = exec.Command("kubectl", "delete", "pod", metricsCurlPodName,
+				"-n", metricsTestNamespace, "--ignore-not-found=true")
 			_, _ = utils.Run(cmd)
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
+			cmd = exec.Command("kubectl", "run", metricsCurlPodName, "--restart=Never",
+				"--namespace", metricsTestNamespace,
 				"--image=curlimages/curl:latest",
 				"--overrides",
 				fmt.Sprintf(`{
@@ -280,15 +315,15 @@ var _ = Describe("Manager", Ordered, func() {
 						}],
 						"serviceAccountName": "%s"
 					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
+				}`, token, metricsServiceName, namespace, metricsTestServiceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
 
 			By("waiting for the curl-metrics pod to complete.")
 			verifyCurlUp := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "curl-metrics",
+				cmd := exec.Command("kubectl", "get", "pods", metricsCurlPodName,
 					"-o", "jsonpath={.status.phase}",
-					"-n", namespace)
+					"-n", metricsTestNamespace)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
@@ -297,7 +332,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("getting the metrics by checking curl-metrics logs")
 			verifyMetricsAvailable := func(g Gomega) {
-				metricsOutput, err := getMetricsOutput()
+				metricsOutput, err := getMetricsOutput(metricsTestNamespace)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 				g.Expect(metricsOutput).NotTo(BeEmpty())
 				g.Expect(metricsOutput).To(MatchRegexp(`< HTTP/(1\.1|2) 200`))
@@ -1183,14 +1218,14 @@ spec:
 // serviceAccountToken returns a token for the specified service account in the given namespace.
 // It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
 // and parsing the resulting token from the API response.
-func serviceAccountToken() (string, error) {
+func serviceAccountToken(serviceAccountNamespace, serviceAccount string) (string, error) {
 	const tokenRequestRawString = `{
 		"apiVersion": "authentication.k8s.io/v1",
 		"kind": "TokenRequest"
 	}`
 
 	// Temporary file to store the token request
-	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
+	secretName := fmt.Sprintf("%s-token-request", serviceAccount)
 	tokenRequestFile := filepath.Join("/tmp", secretName)
 	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
 	if err != nil {
@@ -1209,8 +1244,8 @@ func serviceAccountToken() (string, error) {
 		// Execute kubectl command to create the token
 		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
 			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
-			namespace,
-			serviceAccountName,
+			serviceAccountNamespace,
+			serviceAccount,
 		), "-f", tokenRequestFile)
 
 		output, err := cmd.CombinedOutput()
@@ -1231,9 +1266,9 @@ func serviceAccountToken() (string, error) {
 }
 
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
-func getMetricsOutput() (string, error) {
+func getMetricsOutput(metricsNamespace string) (string, error) {
 	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+	cmd := exec.Command("kubectl", "logs", metricsCurlPodName, "-n", metricsNamespace)
 	return utils.Run(cmd)
 }
 
