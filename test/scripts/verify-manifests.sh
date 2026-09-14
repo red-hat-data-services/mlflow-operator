@@ -34,6 +34,12 @@ if ! command -v helm &> /dev/null; then
     exit 1
 fi
 echo -e "${GREEN}✅ helm found${NC}"
+
+if ! command -v yq &> /dev/null; then
+    echo -e "${RED}ERROR: yq is required for NetworkPolicy validation${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ yq found${NC}"
 echo ""
 
 # Track overall status
@@ -291,9 +297,102 @@ fi
 echo ""
 
 # ==========================================
-# Step 3: Verify shipped kustomize overlays build
+# Step 3: Verify operator NetworkPolicy renders correctly
 # ==========================================
-echo "Step 3: Verifying shipped kustomize overlays"
+echo "Step 3: Verifying operator NetworkPolicy renders"
+echo "----------------------------------------------"
+
+NETWORK_POLICY_EXIT_CODE=0
+for overlay in config/overlays/odh config/overlays/rhoai; do
+    overlay_name=$(basename "$overlay")
+    overlay_network_policy_failed=0
+    echo "Checking operator NetworkPolicy in overlay: $overlay_name"
+    if overlay_render=$(bin/kustomize build "$overlay" 2>&1); then
+        policy_render=$(awk '
+            BEGIN { RS="---" }
+            /kind: NetworkPolicy/ && /name: mlflow-operator-controller-manager/ { print }
+        ' <<< "$overlay_render")
+
+        expected_namespace="opendatahub"
+        if [ "$overlay_name" = "rhoai" ]; then
+            expected_namespace="redhat-ods-applications"
+        fi
+
+        policy_json=$(yq -o=json '.' <<< "$policy_render")
+        if ! NETWORK_POLICY_JSON="$policy_json" EXPECTED_NAMESPACE="$expected_namespace" python3 - <<'PY'
+import json
+import os
+
+policy = json.loads(os.environ["NETWORK_POLICY_JSON"])
+expected_monitoring_namespaces = {
+    "openshift-monitoring",
+    "openshift-user-workload-monitoring",
+    "redhat-ods-monitoring",
+    "opendatahub-monitoring",
+}
+
+assert policy["apiVersion"] == "networking.k8s.io/v1"
+assert policy["kind"] == "NetworkPolicy"
+assert policy["metadata"] == {
+    "name": "mlflow-operator-controller-manager",
+    "namespace": os.environ["EXPECTED_NAMESPACE"],
+}
+
+spec = policy["spec"]
+assert spec["podSelector"] == {"matchLabels": {
+    "control-plane": "controller-manager",
+    "app.kubernetes.io/name": "mlflow-operator",
+}}
+assert spec["policyTypes"] == ["Ingress"]
+assert "egress" not in spec
+
+ingress_rules = spec["ingress"]
+assert len(ingress_rules) == 2
+health_rules = [rule for rule in ingress_rules if rule.get("ports") == [{
+    "protocol": "TCP", "port": 8081,
+}]]
+assert len(health_rules) == 1
+assert "from" not in health_rules[0]
+
+metrics_rules = [rule for rule in ingress_rules if rule.get("ports") == [{
+    "protocol": "TCP", "port": 8443,
+}]]
+assert len(metrics_rules) == 1
+metrics_peers = metrics_rules[0]["from"]
+assert len(metrics_peers) == len(expected_monitoring_namespaces)
+actual_monitoring_namespaces = set()
+for peer in metrics_peers:
+    assert set(peer) == {"namespaceSelector"}
+    selector = peer["namespaceSelector"]
+    assert set(selector) == {"matchLabels"}
+    assert set(selector["matchLabels"]) == {"kubernetes.io/metadata.name"}
+    actual_monitoring_namespaces.add(selector["matchLabels"]["kubernetes.io/metadata.name"])
+assert actual_monitoring_namespaces == expected_monitoring_namespaces
+PY
+        then
+            echo -e "${RED}✗ $overlay_name operator NetworkPolicy has an unexpected selector or ingress rule${NC}"
+            NETWORK_POLICY_EXIT_CODE=1
+            overlay_network_policy_failed=1
+        fi
+        if [ "$overlay_network_policy_failed" -eq 0 ]; then
+            echo -e "${GREEN}✓ $overlay_name operator NetworkPolicy has the expected selector, namespace, monitoring sources, and ports${NC}"
+        fi
+    else
+        echo -e "${RED}✗ $overlay_name could not be rendered for NetworkPolicy verification${NC}"
+        printf '%s\n' "$overlay_render"
+        NETWORK_POLICY_EXIT_CODE=1
+    fi
+done
+
+if [ "$NETWORK_POLICY_EXIT_CODE" -ne 0 ]; then
+    OVERALL_EXIT_CODE=1
+fi
+echo ""
+
+# ==========================================
+# Step 4: Verify shipped kustomize overlays build
+# ==========================================
+echo "Step 4: Verifying shipped kustomize overlays"
 echo "----------------------------------------------"
 
 OVERLAY_EXIT_CODE=0
@@ -331,9 +430,9 @@ fi
 echo ""
 
 # ==========================================
-# Step 4: Verify CI/local test manifests build
+# Step 5: Verify CI/local test manifests build
 # ==========================================
-echo "Step 4: Verifying CI/local test manifests"
+echo "Step 5: Verifying CI/local test manifests"
 echo "----------------------------------------------"
 
 TEST_INFRA_EXIT_CODE=0
