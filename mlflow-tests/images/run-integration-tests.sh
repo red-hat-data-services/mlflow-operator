@@ -31,6 +31,7 @@
 #   SKIP_OPERATOR               forward operator reuse behavior to test-run.sh
 #   SKIP_CLEANUP                forward cleanup behavior to test-run.sh
 #   CLEANUP_REUSED_RESOURCES    forward reused-resource cleanup behavior to test-run.sh
+#   DISABLE_TLS                 forward direct S3 TLS verification behavior to test-run.sh
 #   MLFLOW_TEST_SUPPORTED_VERSION
 #                               override the version used to select upgrade datasets
 #   upgrade_test_workspace      namespace used by upgrade pre/post phases
@@ -78,12 +79,39 @@ if [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
     --add-host "minio-service.${NAMESPACE}.svc.cluster.local:127.0.0.1"
   )
 fi
+# The split S3 GC row persists the artifact Service DNS name so the GC Job can
+# use it in-cluster. Map that same name to the host-side port-forward for the
+# host-networked external test container.
+if [ "${ARTIFACTS_SERVER:-false}" = "true" ] && \
+   [ "${ARTIFACTS_SERVER_GATEWAY:-false}" != "true" ] && \
+   [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
+  docker_args+=(
+    --add-host "mlflow-artifacts.${NAMESPACE}.svc:127.0.0.1"
+  )
+fi
+
+if [ -n "${CA_BUNDLE_PATH:-}" ]; then
+  ca_bundle_host_path="$(cd "$(dirname "$CA_BUNDLE_PATH")" && pwd)/$(basename "$CA_BUNDLE_PATH")"
+  if [ ! -r "$ca_bundle_host_path" ]; then
+    echo "ERROR: CA_BUNDLE_PATH is not readable: $CA_BUNDLE_PATH" >&2
+    exit 1
+  fi
+  ca_bundle_container_path="/mlflow/external-ca-bundle.pem"
+  docker_args+=(--volume "$ca_bundle_host_path:$ca_bundle_container_path:ro,z")
+  CA_BUNDLE_PATH="$ca_bundle_container_path"
+fi
 
 for name in \
   SKIP_DEPLOYMENT \
   SKIP_OPERATOR \
   SKIP_CLEANUP \
   CLEANUP_REUSED_RESOURCES \
+  DISABLE_TLS \
+  CA_BUNDLE_PATH \
+  CA_BUNDLE_CONFIGMAP \
+  S3_ENDPOINT_URL \
+  AWS_DEFAULT_ENDPOINT \
+  AWS_DEFAULT_REGION \
   MLFLOW_TEST_SUPPORTED_VERSION \
   upgrade_test_workspace; do
   if [[ -v "$name" ]]; then

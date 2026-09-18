@@ -20,6 +20,7 @@ from mlflow.protos import databricks_pb2
 from mlflow.protos.service_pb2 import StartTraceV3
 from mlflow.utils.proto_json_utils import message_to_json
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
+from mlflow_tests.utils.wait import retry
 
 from tests.constants.config import Config
 from tests.http_utils import get_mlflow_base_uri, get_requests_verify_value
@@ -134,21 +135,16 @@ def action_post_trace_v3_direct(test_context: TestContext) -> None:
     }
     trace_endpoint = f"{get_mlflow_base_uri()}/api/3.0/mlflow/traces"
 
-    for attempt in range(1, _TRACE_POST_MAX_ATTEMPTS + 1):
-        try:
-            response = requests.post(trace_endpoint, **request_kwargs)
-            break
-        except requests_exceptions.ConnectionError as error:
-            if attempt == _TRACE_POST_MAX_ATTEMPTS or not _is_connection_refused(error):
-                raise
-            delay = _TRACE_POST_RETRY_DELAY_SECONDS * attempt
-            logger.warning(
-                "Trace POST connection failed (attempt %s/%s); retrying in %ss",
-                attempt,
-                _TRACE_POST_MAX_ATTEMPTS,
-                delay,
-            )
-            time.sleep(delay)
+    @retry(
+        description="Trace POST connection",
+        max_attempts=_TRACE_POST_MAX_ATTEMPTS,
+        backoff=lambda attempt: _TRACE_POST_RETRY_DELAY_SECONDS * attempt,
+        retry_rules={requests_exceptions.ConnectionError: _is_connection_refused},
+    )
+    def _post_trace() -> requests.Response:
+        return requests.post(trace_endpoint, **request_kwargs)
+
+    response = _post_trace()
 
     if response.status_code >= 400:
         response_message = response.text
