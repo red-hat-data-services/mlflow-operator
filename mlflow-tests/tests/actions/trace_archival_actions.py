@@ -25,13 +25,18 @@ from mlflow.tracing.utils.otlp import (
     resource_to_otel_proto,
 )
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
-from mlflow_tests.utils.client import ClientManager
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
 )
 
+from mlflow_tests.utils.client import ClientManager
+
 from ..constants.config import Config
-from ..http_utils import get_mlflow_base_uri, get_requests_verify_value
+from ..http_utils import (
+    get_mlflow_base_uri,
+    get_requests_verify_value,
+    get_s3_verify_value,
+)
 from ..shared import TestContext
 
 logger = logging.getLogger(__name__)
@@ -88,15 +93,11 @@ def _archive_s3_client():
         "service_name": "s3",
         "aws_access_key_id": access_key,
         "aws_secret_access_key": secret_key,
+        "verify": get_s3_verify_value(endpoint_url),
     }
     if endpoint_url is not None:
         boto_kwargs["endpoint_url"] = endpoint_url
         boto_kwargs["config"] = BotocoreConfig(s3={"addressing_style": "path"})
-        # The SeaweedFS TLS test endpoint is port-forwarded to localhost, but the
-        # generated cert SANs only cover the in-cluster service DNS names.
-        if endpoint_url.startswith("https://localhost:") and Config.DISABLE_TLS == "true":
-            boto_kwargs["verify"] = False
-
     return boto3.client(**boto_kwargs), bucket
 
 

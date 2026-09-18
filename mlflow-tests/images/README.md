@@ -110,6 +110,8 @@ The script is configured entirely via environment variables. Variables can also 
 | `AWS_SECRET_ACCESS_KEY` | _(unset)_ | S3 secret key (`STORAGE_TYPE=s3` only). |
 | `BUCKET` | _(unset)_ | S3 bucket name (`STORAGE_TYPE=s3` only). |
 | `S3_ENDPOINT_URL` | _(unset)_ | S3 endpoint URL (`STORAGE_TYPE=s3` only). |
+| `CA_BUNDLE_PATH` | _(unset)_ | PEM bundle for a private-CA S3 endpoint. The container launcher mounts this file read-only. |
+| `CA_BUNDLE_CONFIGMAP` | _(unset)_ | Existing ConfigMap containing the PEM bundle for a private-CA S3 endpoint. |
 | `DB_HOST` | _(auto)_ | PostgreSQL hostname (when either metadata store uses `postgres`). |
 | `DB_PORT` | `5432` | PostgreSQL port (when either metadata store uses `postgres`). |
 | `DB_USER` | `mlflow` | PostgreSQL username. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
@@ -126,6 +128,12 @@ extracts all `.crt` and `.pem` entries from the configured CA ConfigMap and
 configures the test clients to trust them. This lets multipart downloads reach
 SeaweedFS without changing the in-cluster endpoint used by MLflow or disabling
 certificate verification.
+
+For `externals3`, set `CA_BUNDLE_PATH` or `CA_BUNDLE_CONFIGMAP` when the S3
+endpoint uses a private CA. The harness exports the supplied PEM file or the
+certificate entries in the ConfigMap to direct artifact downloads, trace-archive
+checks, and garbage-collection checks. Otherwise, these clients follow
+`DISABLE_TLS`, like the rest of the test configuration.
 
 ### Infrastructure image overrides
 
@@ -144,7 +152,7 @@ certificate verification.
 | `MLFLOW_OPERATOR_BRANCH` | `main` | Branch to pull manifests from for CSV patching. |
 | `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `base` or `openshift`. When unset, the harness inspects `route.openshift.io` and selects `openshift` only if route resources are actually present; otherwise it uses `base`. |
 | `FORCE_PORT_FORWARD` | `false` | Force the harness to port-forward the MLflow service to `localhost:8443` even on OpenShift, instead of using the MLflow CR `status.url`. |
-| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Normal runs may use multiple backends; generic Kubernetes uses a direct Service port-forward on `localhost:8444`. |
+| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Generic Kubernetes normally uses a direct Service port-forward on `localhost:8444`; its split S3 GC row persists the in-cluster artifact Service DNS name and uses the Service TLS port instead. |
 | `ARTIFACTS_SERVER_GATEWAY` | `false` | Also require live OpenShift Gateway acceptance and run tracking-relative rewrite assertions. |
 
 ### Skip / control flags
@@ -200,7 +208,9 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... BUCKET=my-bucket S3_ENDPOINT_URL
   STORAGE_TYPE=s3 bash images/test-run.sh
 ```
 
-`deploy.py` enables `spec.traceArchival` automatically only for `s3` or `externals3` when both the backend and registry stores use PostgreSQL (same bucket, `/trace-archive` prefix, schedule `0 0 1 1 *` so the CronJob does not fire during CI). Harness-driven runs default `TRACE_ARCHIVAL_RETENTION=1m` and pass that through to the MLflow CR so the smoke suite can create several traces, persist them as DB-backed spans via OTLP `/v1/traces` (prefixed tracking URI first, then the unprefixed Kind port-forward path), run a Job from the CronJob template, and verify that archive objects appear, traces remain readable, and `SPANS_LOCATION=ARCHIVE_REPO`. S3 rows involving SQLite retain their `ReadWriteOnce` PVC and omit trace archival; the smoke test reads the deployed CR and skips when archival is not enabled.
+`deploy.py` enables `spec.traceArchival` automatically only for `s3` or `externals3` when both the backend and registry stores use PostgreSQL (same bucket, `/trace-archive` prefix, schedule `0 0 29 2 *` so the CronJob does not fire during CI). Harness-driven runs default `TRACE_ARCHIVAL_RETENTION=1m` and pass that through to the MLflow CR so the smoke suite can create several traces, persist them as DB-backed spans via OTLP `/v1/traces` (prefixed tracking URI first, then the unprefixed Kind port-forward path), run a Job from the CronJob template, and verify that archive objects appear, traces remain readable, and `SPANS_LOCATION=ARCHIVE_REPO`. S3 rows involving SQLite retain their `ReadWriteOnce` PVC and omit trace archival; the smoke test reads the deployed CR and skips when archival is not enabled.
+
+The same safe PostgreSQL/S3 rows enable `spec.garbageCollection` with the non-firing schedule `0 0 29 2 *`. Its smoke test soft-deletes an experiment containing a run artifact, creates a one-off Job from `mlflow-gc`, and verifies that run and experiment metadata plus the S3 object are permanently removed.
 
 For dedicated artifact serving, the Kind CI launcher installs the pinned `HTTPRoute` CRD before the
 operator starts and the harness port-forwards `mlflow-artifacts` for direct workspace-authenticated
@@ -209,6 +219,11 @@ OpenShift with a working data science Gateway to additionally validate route acc
 Direct local `test-run.sh` invocations on Kind must apply
 `test/crd/httproutes.gateway.networking.k8s.io.yaml` before operator startup; unlike the CI launcher,
 `test-run.sh` does not install cluster CRDs.
+
+For the dedicated artifact-server S3 row, the persisted artifact root is
+`https://mlflow-artifacts.<namespace>.svc:8443`. The CI launcher maps that hostname to its local
+artifact-service port-forward; direct `test-run.sh` use must make the same hostname resolve to
+`127.0.0.1` (for example with an `/etc/hosts` entry) before starting the harness.
 
 ### PostgreSQL metadata store
 

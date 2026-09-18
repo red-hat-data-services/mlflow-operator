@@ -101,7 +101,8 @@ Operator / OpenShift:
                           server (default: false). Requires the HTTPRoute API, PostgreSQL
                           backend/registry stores, and file, s3, or externals3 artifacts.
                           Normal runs may exercise multiple artifact backends. Generic Kubernetes
-                          accesses the artifact Service through localhost:8444.
+                          normally accesses the artifact Service through localhost:8444. The
+                          split S3 GC row uses its in-cluster Service DNS name instead.
   ARTIFACTS_SERVER_GATEWAY true|false — validate live Gateway route acceptance and rewrites
                           (default: false). Requires ARTIFACTS_SERVER=true and OpenShift.
 
@@ -701,7 +702,14 @@ restore_test_ca_bundle_environment() {
 
 configure_test_ca_bundle() {
     restore_test_ca_bundle_environment
-    if [ "$STORAGE_TYPE" != "s3" ] || [ "$SEAWEEDFS_TLS" != "true" ]; then
+    local needs_ca_bundle=false
+    if [ "$STORAGE_TYPE" = "s3" ] && [ "$SEAWEEDFS_TLS" = "true" ]; then
+        needs_ca_bundle=true
+    elif [ "$STORAGE_TYPE" = "externals3" ] && \
+         { [ -n "$CA_BUNDLE_PATH" ] || [ -n "$CA_BUNDLE_CONFIGMAP" ]; }; then
+        needs_ca_bundle=true
+    fi
+    if [ "$needs_ca_bundle" != "true" ]; then
         return 0
     fi
 
@@ -714,12 +722,23 @@ configure_test_ca_bundle() {
     done
     _TEST_CA_ENV_CAPTURED=true
 
-    local configmap_name="${CA_BUNDLE_CONFIGMAP:-mlflow-ca-bundle}"
     local custom_ca_file
     custom_ca_file="$(mktemp)"
     TEST_CA_BUNDLE_FILE="$(mktemp)"
 
-    if ! kubectl get configmap "$configmap_name" --namespace "$NAMESPACE" -o json \
+    local ca_source
+    if [ -n "$CA_BUNDLE_PATH" ]; then
+        if [ ! -r "$CA_BUNDLE_PATH" ]; then
+            echo "ERROR: CA bundle file is not readable: ${CA_BUNDLE_PATH}" >&2
+            rm -f "$custom_ca_file"
+            restore_test_ca_bundle_environment
+            return 1
+        fi
+        cp "$CA_BUNDLE_PATH" "$custom_ca_file"
+        ca_source="CA bundle file ${CA_BUNDLE_PATH}"
+    else
+        local configmap_name="${CA_BUNDLE_CONFIGMAP:-mlflow-ca-bundle}"
+        if ! kubectl get configmap "$configmap_name" --namespace "$NAMESPACE" -o json \
         | uv run --project "$UV_PROJECT_DIR" --no-sync python -c '
 import json
 import sys
@@ -730,13 +749,15 @@ if not certificates:
     raise SystemExit("ConfigMap has no .crt or .pem entries")
 sys.stdout.write("\n".join(certificates))
 ' > "$custom_ca_file"; then
-        echo "ERROR: Failed to read .crt or .pem certificates from ConfigMap ${configmap_name}" >&2
-        rm -f "$custom_ca_file"
-        restore_test_ca_bundle_environment
-        return 1
+            echo "ERROR: Failed to read .crt or .pem certificates from ConfigMap ${configmap_name}" >&2
+            rm -f "$custom_ca_file"
+            restore_test_ca_bundle_environment
+            return 1
+        fi
+        ca_source="ConfigMap ${configmap_name}"
     fi
     if ! grep -q "BEGIN CERTIFICATE" "$custom_ca_file"; then
-        echo "ERROR: ConfigMap ${configmap_name} does not contain a valid CA certificate" >&2
+        echo "ERROR: ${ca_source} does not contain a valid CA certificate" >&2
         rm -f "$custom_ca_file"
         restore_test_ca_bundle_environment
         return 1
@@ -756,7 +777,7 @@ sys.stdout.write("\n".join(certificates))
     export REQUESTS_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
     export CURL_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
     export AWS_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
-    echo "  Configured test clients to trust ${configmap_name}"
+    echo "  Configured test clients to trust ${ca_source}"
 }
 
 wait_for_mlflow_cr_available() {
@@ -1123,7 +1144,13 @@ run_suite_body() {
         if [ "$ARTIFACTS_SERVER" = "true" ] && \
            [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
            [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
-            deploy_args+=(--mlflow-url "https://localhost:8444")
+            if [ "$STORAGE_TYPE" = "s3" ]; then
+                # GC runs inside the cluster, so persisted artifact URIs must
+                # target the Service rather than the runner port-forward.
+                deploy_args+=(--mlflow-url "https://mlflow-artifacts.${NAMESPACE}.svc:8443")
+            else
+                deploy_args+=(--mlflow-url "https://localhost:8444")
+            fi
         fi
         [ -n "${MLFLOW_RESOLVED_IMAGE}" ] && deploy_args+=(--mlflow-image "$MLFLOW_RESOLVED_IMAGE")
 
@@ -1263,11 +1290,19 @@ run_suite_body() {
         if [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && [ "$FORCE_PORT_FORWARD" = "true" ]; then
             echo "  FORCE_PORT_FORWARD=true, using localhost port-forward instead of MLflow CR status.url"
         fi
-        echo "  Port-forwarding MLflow service to localhost:8443..."
-        kubectl port-forward "svc/${MLFLOW_NAME}" -n "$NAMESPACE" 8443:8443 &
+        local tracking_port=8443
+        if [ "$ARTIFACTS_SERVER" = "true" ] && \
+           [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
+           [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] && \
+           [ "$STORAGE_TYPE" = "s3" ]; then
+            # Reserve the Service's native TLS port for the artifact endpoint.
+            tracking_port=8442
+        fi
+        echo "  Port-forwarding MLflow service to localhost:${tracking_port}..."
+        kubectl port-forward "svc/${MLFLOW_NAME}" -n "$NAMESPACE" "${tracking_port}:8443" &
         PF_PID=$!
         sleep 2
-        export MLFLOW_TRACKING_URI="https://localhost:8443${mlflow_base_path}"
+        export MLFLOW_TRACKING_URI="https://localhost:${tracking_port}${mlflow_base_path}"
     fi
     echo "  MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI"
 
@@ -1298,11 +1333,21 @@ run_suite_body() {
             published_artifacts_url="$(kubectl get mlflow "$MLFLOW_NAME" -n "$NAMESPACE" -o jsonpath='{.status.artifactsUrl}')"
             export MLFLOW_ARTIFACTS_URI="${published_artifacts_url%/api/2.0/mlflow-artifacts/artifacts}"
         else
-            echo "  Port-forwarding dedicated artifact service to localhost:8444..."
-            kubectl port-forward "svc/mlflow-artifacts" -n "$NAMESPACE" 8444:8443 &
+            local artifacts_port=8444
+            local artifacts_uri_host="localhost"
+            if [ "$STORAGE_TYPE" = "s3" ] && \
+               [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
+                # Keep the URI persisted by MLflow identical to the one a GC
+                # Job resolves in-cluster. The launcher maps this host to the
+                # local port-forward for the external test client.
+                artifacts_port=8443
+                artifacts_uri_host="mlflow-artifacts.${NAMESPACE}.svc"
+            fi
+            echo "  Port-forwarding dedicated artifact service to localhost:${artifacts_port}..."
+            kubectl port-forward "svc/mlflow-artifacts" -n "$NAMESPACE" "${artifacts_port}:8443" &
             ARTIFACTS_PF_PID=$!
             sleep 2
-            export MLFLOW_ARTIFACTS_URI="https://localhost:8444/mlflow-artifacts"
+            export MLFLOW_ARTIFACTS_URI="https://${artifacts_uri_host}:${artifacts_port}/mlflow-artifacts"
         fi
         echo "  MLFLOW_ARTIFACTS_URI=$MLFLOW_ARTIFACTS_URI"
     fi
@@ -1343,7 +1388,7 @@ run_suite_body() {
     fi
     if ! configure_test_ca_bundle; then
         fail_suite "test_configure_ca_bundle" \
-            "Failed to configure test clients with the SeaweedFS CA bundle"
+            "Failed to configure test clients with the configured CA bundle"
         return 1
     fi
 
@@ -1374,6 +1419,14 @@ run_suite_body() {
         return 1
     fi
     export trace_archival_enabled="${deployed_trace_archival:-false}"
+    local deployed_garbage_collection
+    if ! deployed_garbage_collection="$(kubectl get mlflow "$MLFLOW_NAME" -o jsonpath='{.spec.garbageCollection.schedule}')"; then
+        echo "ERROR: Failed to read garbage collection state from MLflow CR ${MLFLOW_NAME}" >&2
+        fail_suite "test_read_garbage_collection_state" "Failed to read garbage collection state from MLflow CR ${MLFLOW_NAME}"
+        restore_test_ca_bundle_environment
+        return 1
+    fi
+    export garbage_collection_enabled="${deployed_garbage_collection:+true}"
 
     local results_file="${TEST_RESULTS_DIR}/xunit_report_${STORAGE_TYPE}.xml"
     echo "  Running tests (output: $results_file)..."
