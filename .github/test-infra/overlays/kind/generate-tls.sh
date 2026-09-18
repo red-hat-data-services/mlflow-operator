@@ -22,7 +22,7 @@ if [ "${1:-}" = "generate" ] || [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; t
     # Generate self-signed certificate and key
     openssl req -x509 -newkey rsa:2048 -keyout "$TEMP_DIR/tls.key" -out "$TEMP_DIR/tls.crt" \
         -days 365 -nodes -subj "/CN=mlflow.$NAMESPACE.svc.cluster.local" \
-        -addext "subjectAltName=DNS:mlflow.$NAMESPACE.svc.cluster.local,DNS:mlflow.$NAMESPACE.svc,DNS:mlflow.$NAMESPACE,DNS:mlflow,DNS:localhost"
+        -addext "subjectAltName=DNS:mlflow.$NAMESPACE.svc.cluster.local,DNS:mlflow.$NAMESPACE.svc,DNS:mlflow.$NAMESPACE,DNS:mlflow,DNS:mlflow-artifacts.$NAMESPACE.svc.cluster.local,DNS:mlflow-artifacts.$NAMESPACE.svc,DNS:mlflow-artifacts.$NAMESPACE,DNS:mlflow-artifacts,DNS:localhost"
 
     # Move generated files to final location
     mv "$TEMP_DIR/tls.crt" "$CERT_FILE"
