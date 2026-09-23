@@ -829,6 +829,12 @@ data:
 					g.Expect(mlflowRelease.Version).To(Equal(controllerpkg.SupportedMLflowVersion))
 				}, 2*time.Minute, time.Second).Should(Succeed())
 
+				By("bumping platformVersion and waiting for status.releases to follow")
+				setPlatformConfigVersion(platformConfigMapName, "2.20.1", mlflowName)
+
+				By("restoring platformVersion and waiting for status.releases to follow")
+				setPlatformConfigVersion(platformConfigMapName, platformVersion, mlflowName)
+
 				By("patching MLflowOperator.spec.gateway.domain")
 				cmd = exec.Command(
 					"kubectl", "patch", "mlflowoperator", mlflowOperatorName,
@@ -1840,6 +1846,35 @@ func moduleReleaseByName(g Gomega, name string) (moduleRelease, bool) {
 		}
 	}
 	return moduleRelease{}, false
+}
+
+func setPlatformConfigVersion(configMap, version, deployment string) {
+	payload := fmt.Sprintf(`{"data":{"platformVersion":%q}}`, version)
+	cmd := exec.Command(
+		"kubectl", "patch", "configmap", configMap,
+		"-n", namespace,
+		"--type=merge",
+		"-p", payload,
+	)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to patch platform ConfigMap version")
+
+	Eventually(func(g Gomega) {
+		release, found := moduleReleaseByName(g, "platform")
+		g.Expect(found).To(BeTrue())
+		g.Expect(release.Version).To(Equal(version))
+
+		output, getErr := kubectlOutput(
+			"get", "deployment", deployment,
+			"-n", namespace,
+			"-o", "jsonpath={.status.availableReplicas}",
+		)
+		g.Expect(getErr).NotTo(HaveOccurred())
+		g.Expect(output).NotTo(BeEmpty())
+		available, parseErr := strconv.Atoi(output)
+		g.Expect(parseErr).NotTo(HaveOccurred())
+		g.Expect(available).To(BeNumerically(">=", 1))
+	}, 2*time.Minute, time.Second).Should(Succeed())
 }
 
 func kubectlOutput(args ...string) (string, error) {
