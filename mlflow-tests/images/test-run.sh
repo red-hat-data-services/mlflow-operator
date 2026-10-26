@@ -123,7 +123,10 @@ Other:
   upgrade_test_workspace Static workspace namespace for upgrade pytest phases. During
                         upgrade-phase runs, the harness derives workspaces and RBAC
                         setup from this namespace automatically.
-  TEST_RESULTS_DIR      Directory for JUnit XML output (default: /mlflow/results)
+  TEST_RESULTS_DIR      Directory for JUnit XML output (default: /mlflow/results).
+                        Pytest writes xunit_report_<storage>.xml here. Pre-pytest
+                        harness aborts write the same filename so Jenkins/Report
+                        Portal still see a failed mlflow-e2e testcase.
   DEPLOY_PY             Path to deploy.py (default: <repo>/.github/actions/deploy/deploy.py)
   ARTIFACT_BACKENDS     Comma-separated artifact storage backends to test in sequence (default: file,s3)
                         Supported values: file, s3 (SeaweedFS), externals3 (external S3 via AWS_* env vars)
@@ -155,9 +158,22 @@ infer_requested_upgrade_phase() {
 }
 
 INFERRED_UPGRADE_PHASE=""
+JUNIT_SUITE_NAME="mlflow-e2e"
 for ((i=0; i<${#PYTEST_ARGS[@]}; i++)); do
     arg="${PYTEST_ARGS[$i]}"
     mark_expr=""
+    if [[ "$arg" == *junit_suite_name=* ]]; then
+        JUNIT_SUITE_NAME="${arg#*junit_suite_name=}"
+        JUNIT_SUITE_NAME="${JUNIT_SUITE_NAME%% *}"
+    elif [ "$arg" = "-o" ]; then
+        next_index=$((i + 1))
+        if [ "$next_index" -lt "${#PYTEST_ARGS[@]}" ]; then
+            next_opt="${PYTEST_ARGS[$next_index]}"
+            if [[ "$next_opt" == junit_suite_name=* ]]; then
+                JUNIT_SUITE_NAME="${next_opt#junit_suite_name=}"
+            fi
+        fi
+    fi
     if [[ "$arg" == -m=* ]]; then
         mark_expr="${arg#-m=}"
     elif [[ "$arg" == --markexpr=* ]]; then
@@ -175,6 +191,129 @@ for ((i=0; i<${#PYTEST_ARGS[@]}; i++)); do
         INFERRED_UPGRADE_PHASE="$(infer_requested_upgrade_phase "$mark_expr")"
     fi
 done
+
+# Create the results dir before any early exit so config/CSV/deploy aborts can
+# still emit JUnit XML into the directory Jenkins archives.
+TEST_RESULTS_DIR="${TEST_RESULTS_DIR:-/mlflow/results}"
+mkdir -p "$TEST_RESULTS_DIR"
+
+harness_junit_path() {
+    if [ -n "${STORAGE_TYPE:-}" ]; then
+        printf '%s\n' "${TEST_RESULTS_DIR}/xunit_report_${STORAGE_TYPE}.xml"
+    else
+        printf '%s\n' "${TEST_RESULTS_DIR}/xunit_report.xml"
+    fi
+}
+
+harness_error_body() {
+    local message="$1"
+    printf '%s\n' "$message"
+    printf 'storage=%s backend=%s registry=%s\n' \
+        "${STORAGE_TYPE:-unset}" "${BACKEND_STORE:-unset}" "${REGISTRY_STORE:-unset}"
+    printf 'namespace=%s\n' "${NAMESPACE:-unset}"
+    if [ -n "${MLFLOW_TRACKING_URI:-}" ]; then
+        printf 'MLFLOW_TRACKING_URI=%s\n' "$MLFLOW_TRACKING_URI"
+    fi
+}
+
+# Compact cluster/HTTP snapshot for Jenkins Test Result. Full pod logs still go
+# through collect-debug-logs.sh into TEST_RESULTS_DIR/debug/.
+# kubectl calls are time-bounded so a hung API cannot block JUnit emission;
+# fail_suite/fail_run write the XML first, then snapshot, then refresh the
+# harness report if we created it.
+capture_failure_snapshot() {
+    local reason="${1:-harness failure}"
+    local snapshot_dir="${TEST_RESULTS_DIR}/debug"
+    local snapshot_file="${snapshot_dir}/failure-snapshot.txt"
+    local kubectl_cmd=(kubectl --request-timeout=15s)
+    mkdir -p "$snapshot_dir" || return 0
+
+    {
+        echo "=== harness failure snapshot ==="
+        echo "reason: ${reason}"
+        echo "time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "storage=${STORAGE_TYPE:-unset} backend=${BACKEND_STORE:-unset} registry=${REGISTRY_STORE:-unset}"
+        echo "namespace=${NAMESPACE:-unset}"
+        echo "MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-unset}"
+        echo
+        echo "--- deployments ---"
+        "${kubectl_cmd[@]}" get deploy -n "${NAMESPACE:-}" -o wide 2>&1 || true
+        echo
+        echo "--- pods ---"
+        "${kubectl_cmd[@]}" get pods -n "${NAMESPACE:-}" -o wide 2>&1 || true
+        echo
+        echo "--- mlflow CR ---"
+        if [ -n "${NAMESPACE:-}" ] && "${kubectl_cmd[@]}" get mlflow "${MLFLOW_NAME:-mlflow}" -n "$NAMESPACE" >/dev/null 2>&1; then
+            "${kubectl_cmd[@]}" get mlflow "${MLFLOW_NAME:-mlflow}" -n "$NAMESPACE" \
+                -o jsonpath='url={.status.url}{"\n"}version={.status.version}{"\n"}{range .status.conditions[*]}{.type}={.status} reason={.reason} message={.message}{"\n"}{end}' 2>&1 || true
+            echo
+        else
+            echo "MLflow CR not found (or kubectl/namespace unavailable)"
+        fi
+        echo "--- warning events ---"
+        "${kubectl_cmd[@]}" get events -n "${NAMESPACE:-}" --field-selector type=Warning --sort-by=.lastTimestamp 2>&1 | tail -n 20 || true
+        echo
+        if [ -f "${snapshot_dir}/server-info-last-stderr.txt" ] || [ -f "${snapshot_dir}/server-info-last-body.txt" ]; then
+            echo "--- last server-info probe ---"
+            echo "stderr: $(tr '\n' ' ' < "${snapshot_dir}/server-info-last-stderr.txt" 2>/dev/null | head -c 300 || true)"
+            echo "body:"
+            head -c 500 "${snapshot_dir}/server-info-last-body.txt" 2>/dev/null || true
+            echo
+        fi
+    } > "$snapshot_file" || true
+
+    echo "  Failure snapshot: ${snapshot_file}"
+    if [ -f "$snapshot_file" ]; then
+        cat "$snapshot_file" || true
+    fi
+}
+
+write_harness_junit_error() {
+    local test_name="$1"
+    local message="$2"
+    local output_file body snapshot_file
+    local extra_args=()
+    output_file="$(harness_junit_path)"
+    body="$(harness_error_body "$message")"
+    snapshot_file="${TEST_RESULTS_DIR}/debug/failure-snapshot.txt"
+    if [ -f "$snapshot_file" ]; then
+        body="${body}"$'\n\n'"$(head -c 8192 "$snapshot_file" 2>/dev/null || true)"
+    fi
+    if [ "${3:-}" = "--replace" ]; then
+        extra_args+=(--replace)
+    fi
+    local writer_rc=0
+    python3 "$SCRIPT_DIR/write_harness_junit.py" \
+        --output "$output_file" \
+        --suite "$JUNIT_SUITE_NAME" \
+        --name "$test_name" \
+        --message "$message" \
+        --body "$body" \
+        "${extra_args[@]}" || writer_rc=$?
+    if [ "$writer_rc" -eq 0 ]; then
+        return 0
+    fi
+    if [ "$writer_rc" -ne 2 ]; then
+        echo "WARN: failed to write harness JUnit report to ${output_file}" >&2
+    fi
+    return 1
+}
+
+fail_suite() {
+    local wrote_junit=0
+    if write_harness_junit_error "$1" "$2"; then
+        wrote_junit=1
+    fi
+    capture_failure_snapshot "$2"
+    if [ "$wrote_junit" -eq 1 ]; then
+        write_harness_junit_error "$1" "$2" --replace || true
+    fi
+}
+
+fail_run() {
+    fail_suite "$1" "$2"
+    exit 1
+}
 
 get_supported_mlflow_version_raw() {
     python3 "$REPO_ROOT/scripts/print_supported_mlflow_version.py" \
@@ -218,7 +357,7 @@ if [ -n "${DB_TYPE:-}" ]; then
             ;;
         *)
             echo "ERROR: Unsupported DB_TYPE='${DB_TYPE}'. Use BACKEND_STORE and REGISTRY_STORE instead." >&2
-            exit 1
+            fail_run "test_config" "Unsupported DB_TYPE='${DB_TYPE}'. Use BACKEND_STORE and REGISTRY_STORE instead."
             ;;
     esac
 fi
@@ -268,7 +407,7 @@ if [ -n "$INFERRED_UPGRADE_PHASE" ]; then
     mapfile -t _upgrade_backends < <(printf '%s\n' "$ARTIFACT_BACKENDS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d')
     if [ "${#_upgrade_backends[@]}" -ne 1 ]; then
         echo "ERROR: Upgrade pytest phases require exactly one backend via ARTIFACT_BACKENDS or STORAGE_TYPE." >&2
-        exit 1
+        fail_run "test_config" "Upgrade pytest phases require exactly one backend via ARTIFACT_BACKENDS or STORAGE_TYPE."
     fi
     ARTIFACT_BACKENDS="${_upgrade_backends[0]}"
     STORAGE_TYPE="$ARTIFACT_BACKENDS"
@@ -279,14 +418,14 @@ ARTIFACT_BACKEND_COUNT="${#_resolved_backends[@]}"
 
 if [ "$SKIP_CLEANUP" = "true" ] && [ "$ARTIFACT_BACKEND_COUNT" -ne 1 ]; then
     echo "ERROR: SKIP_CLEANUP=true requires exactly one backend via ARTIFACT_BACKENDS or STORAGE_TYPE." >&2
-    exit 1
+    fail_run "test_config" "SKIP_CLEANUP=true requires exactly one backend via ARTIFACT_BACKENDS or STORAGE_TYPE."
 fi
 
 case "$CLEANUP_REUSED_RESOURCES" in
     false|true|on_success) ;;
     *)
         echo "ERROR: CLEANUP_REUSED_RESOURCES must be one of: false, true, on_success." >&2
-        exit 1
+        fail_run "test_config" "CLEANUP_REUSED_RESOURCES must be one of: false, true, on_success."
         ;;
 esac
 
@@ -459,6 +598,8 @@ wait_for_mlflow_cr_available() {
     available_status="$(kubectl get mlflow "$MLFLOW_NAME" -n "$NAMESPACE" -o jsonpath="{.status.conditions[?(@.type=='Available')].status}" 2>/dev/null || true)"
     available_reason="$(kubectl get mlflow "$MLFLOW_NAME" -n "$NAMESPACE" -o jsonpath="{.status.conditions[?(@.type=='Available')].reason}" 2>/dev/null || true)"
     echo "ERROR: MLflow CR did not report Available=True within timeout (last status: ${available_status:-missing}, reason: ${available_reason:-missing})" >&2
+    fail_suite "test_wait_for_mlflow_cr_available" \
+        "MLflow CR did not report Available=True within timeout (last status: ${available_status:-missing}, reason: ${available_reason:-missing})"
     collect_debug_logs "status availability failure"
     return 1
 }
@@ -467,21 +608,36 @@ wait_for_mlflow_server_info() {
     local api_url="${MLFLOW_TRACKING_URI%/}/api/3.0/mlflow/server-info"
     local retry=0
     local max_retries=36  # 36 × 5 s = 3 min
+    local debug_dir="${TEST_RESULTS_DIR}/debug"
+    local body_file="${debug_dir}/server-info-last-body.txt"
+    local err_file="${debug_dir}/server-info-last-stderr.txt"
+    local http_code=""
+    local err_preview body_preview
+    mkdir -p "$debug_dir"
 
     echo "  Waiting for MLflow server-info endpoint at $api_url..."
-    until curl -sk --max-time 5 \
-        -H "Authorization: Bearer ${kube_token}" \
-        -o /dev/null -w "%{http_code}" "$api_url" | grep -qx "200"; do
+    while true; do
+        http_code="$(curl -skS --connect-timeout 5 --max-time 5 \
+            -H "Authorization: Bearer ${kube_token}" \
+            -o "$body_file" -w "%{http_code}" "$api_url" 2>"$err_file" || true)"
+        [ -n "$http_code" ] || http_code="000"
+        if [ "$http_code" = "200" ]; then
+            echo "  MLflow server-info endpoint is reachable (HTTP 200)"
+            return 0
+        fi
         retry=$((retry + 1))
+        err_preview="$(tr '\n' ' ' < "$err_file" 2>/dev/null | head -c 180 || true)"
+        body_preview="$(tr '\n' ' ' < "$body_file" 2>/dev/null | head -c 180 || true)"
+        echo "  Attempt $retry/$max_retries HTTP=${http_code} err=${err_preview:-none} body=${body_preview:-<empty>}"
         if [ "$retry" -ge "$max_retries" ]; then
             echo "ERROR: MLflow server-info endpoint did not become reachable within timeout" >&2
+            fail_suite "test_wait_for_mlflow_server_info" \
+                "MLflow server-info endpoint did not become reachable within timeout (url: ${api_url}, last_http=${http_code})"
             collect_debug_logs "server-info readiness failure"
             return 1
         fi
-        echo "  Attempt $retry/$max_retries — retrying in 5s..."
         sleep 5
     done
-    echo "  MLflow server-info endpoint is reachable"
 }
 
 should_cleanup_reused_resources() {
@@ -561,7 +717,7 @@ if [ "$DEPLOY_MLFLOW_OPERATOR" = "true" ] && [ "$SKIP_DEPLOYMENT" != "true" ]; t
     echo "Patching OLM CSV with MLflow operator manifests..."
     if ! find_csv_and_update "$MLFLOW_OPERATOR_OWNER" "$MLFLOW_OPERATOR_REPO" "$MLFLOW_OPERATOR_BRANCH"; then
         echo "ERROR: Failed to patch CSV" >&2
-        exit 1
+        fail_run "test_patch_csv" "Failed to patch OLM CSV with MLflow operator manifests"
     fi
     _OPERATOR_DEPLOYED=true
 fi
@@ -634,7 +790,10 @@ run_suite() {
     for ws in $(echo "$WORKSPACE_LIST" | tr ',' ' '); do
         ws=$(echo "$ws" | xargs); [ -z "$ws" ] && continue
         if ! kubectl get namespace "$ws" &>/dev/null; then
-            kubectl create namespace "$ws" || return $?
+            if ! kubectl create namespace "$ws"; then
+                fail_suite "test_create_workspace_namespace" "Failed to create workspace namespace ${ws}"
+                return 1
+            fi
             _CREATED_WORKSPACES="${_CREATED_WORKSPACES:+${_CREATED_WORKSPACES},}${ws}"
         fi
     done
@@ -698,6 +857,8 @@ run_suite() {
                 ;;
             *)
                 echo "ERROR: Unsupported ARTIFACT_BACKENDS value: '${STORAGE_TYPE}'. Supported: file, s3, externals3" >&2
+                fail_suite "test_artifact_backend" \
+                    "Unsupported ARTIFACT_BACKENDS value: '${STORAGE_TYPE}'. Supported: file, s3, externals3"
                 return 1
                 ;;
         esac
@@ -734,7 +895,13 @@ run_suite() {
             [ -n "${DB_NAME:-}" ] && deploy_args+=(--postgres-registry-db "$DB_NAME")
         fi
 
-        uv run --project "$UV_PROJECT_DIR" --no-sync "$DEPLOY_PY" "${deploy_args[@]}" || return $?
+        local deploy_rc=0
+        uv run --project "$UV_PROJECT_DIR" --no-sync "$DEPLOY_PY" "${deploy_args[@]}" || deploy_rc=$?
+        if [ "$deploy_rc" -ne 0 ]; then
+            fail_suite "test_deploy" "deploy.py failed (exit code ${deploy_rc})"
+            collect_debug_logs "deploy.py failure"
+            return 1
+        fi
         _OPERATOR_DEPLOYED=true
     fi
 
@@ -767,7 +934,10 @@ run_suite() {
 
     # ── RBAC ────────────────────────────────────────────────────────────────────
     # Applied after deploy.py so the SA exists; runs before tests execute.
-    setup_rbac || return $?
+    if ! setup_rbac; then
+        fail_suite "test_setup_rbac" "Failed to set up RBAC for ${MLFLOW_SA_NAME}"
+        return 1
+    fi
 
     # ── Tracking URI ────────────────────────────────────────────────────────────
     if [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && [ "$FORCE_PORT_FORWARD" != "true" ]; then
@@ -781,6 +951,8 @@ run_suite() {
             addr_retry=$((addr_retry + 1))
             if [ "$addr_retry" -ge "$addr_max" ]; then
                 echo "ERROR: MLflow CR status.url not populated within timeout" >&2
+                fail_suite "test_wait_for_mlflow_status_url" \
+                    "MLflow CR status.url not populated within timeout"
                 collect_debug_logs "status.url readiness failure"
                 return 1
             fi
@@ -816,6 +988,7 @@ run_suite() {
     echo "  Generating token for ${MLFLOW_SA_NAME}..."
     if ! kube_token=$(kubectl create token "$MLFLOW_SA_NAME" --namespace "$NAMESPACE"); then
         echo "ERROR: Failed to create token for $MLFLOW_SA_NAME" >&2
+        fail_suite "test_create_kube_token" "Failed to create token for ${MLFLOW_SA_NAME}"
         return 1
     fi
     export kube_token
@@ -836,6 +1009,8 @@ run_suite() {
             --namespace "$NAMESPACE" \
             --timeout=300s; then
             echo "ERROR: MLflow CR did not report status.version=${SUPPORTED_MLFLOW_VERSION_RAW} within timeout" >&2
+            fail_suite "test_wait_for_mlflow_status_version" \
+                "MLflow CR did not report status.version=${SUPPORTED_MLFLOW_VERSION_RAW} within timeout"
             collect_debug_logs "status.version readiness failure"
             return 1
         fi
@@ -883,9 +1058,6 @@ run_suite() {
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
-
-TEST_RESULTS_DIR="${TEST_RESULTS_DIR:-/mlflow/results}"
-mkdir -p "$TEST_RESULTS_DIR"
 
 for suite_idx in "${!_resolved_backends[@]}"; do
     STORAGE_TYPE="${_resolved_backends[$suite_idx]}"

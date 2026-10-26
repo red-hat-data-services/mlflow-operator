@@ -154,7 +154,7 @@ The script is configured entirely via environment variables. Variables can also 
 | `workspaces` | `workspace1-<random>,workspace2-<random>` | Comma-separated list of workspace namespaces to create and test against. |
 | `upgrade_test_workspace` | `mlflow-upgrade-test-workspace` | Static workspace namespace for upgrade pytest phases and their RBAC setup. |
 | `ARTIFACT_BACKENDS` | `file,s3` | Comma-separated artifact backends to run in sequence (`file`, `s3`, `externals3`). Upgrade pytest phases require exactly one value. |
-| `TEST_RESULTS_DIR` | `/mlflow/results` | Directory for JUnit XML output. |
+| `TEST_RESULTS_DIR` | `/mlflow/results` | Directory for JUnit XML output. Pytest writes `xunit_report_<storage>.xml` here; pre-pytest harness aborts write the same file so Jenkins still sees a failed `mlflow-e2e` testcase. A compact `debug/failure-snapshot.txt` is also copied into that JUnit error body. |
 | `DEPLOY_PY` | `<repo>/.github/actions/deploy/deploy.py` | Path to the deploy helper script. |
 
 ## Storage configuration
@@ -196,3 +196,14 @@ BACKEND_STORE=postgres REGISTRY_STORE=postgres DB_HOST=... DB_PASSWORD=... bash 
   `opendatahub-io/mlflow@master` (pinned in `uv.lock`). The MLflow server image must be built from
   the same commit for the workspace feature probe endpoint to match. Use `MLFLOW_IMAGE` to supply
   a freshly built image when updating the lockfile.
+
+## Harness reporting checks
+
+Run the JUnit writer and shell bootstrap failure checks without a cluster:
+
+```bash
+python3 -m pytest -q mlflow-tests/images/test_write_harness_junit.py mlflow-tests/images/test_harness_reporting.py
+```
+
+The shell checks mock deployment and cluster commands, exercise file and S3
+bootstrap failures, and verify authenticated readiness and pytest report preservation.
