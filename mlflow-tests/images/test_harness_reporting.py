@@ -65,6 +65,12 @@ elif cmd == "curl":
     assert "Authorization: Bearer test-token" in args
     Path(args[args.index("-o") + 1]).write_text("mock server response")
     print("503" if stage == "server-info" else "200", end="")
+    if stage == "curl-timeout":
+        print("transfer timed out after headers", file=sys.stderr)
+        sys.exit(28)
+    if stage == "curl-retry" and not (results / "curl-retried").exists():
+        (results / "curl-retried").touch()
+        sys.exit(28)
 elif cmd == "uv":
     if "pytest" in args:
         output = next(a.split("=", 1)[1] for a in args if a.startswith("--junit-xml="))
@@ -127,6 +133,7 @@ else:
         ("token", "test_create_kube_token"),
         ("available", "test_wait_for_mlflow_cr_available"),
         ("server-info", "test_wait_for_mlflow_server_info"),
+        ("curl-timeout", "test_wait_for_mlflow_server_info"),
         ("version", "test_wait_for_mlflow_status_version"),
     ],
 )
@@ -146,20 +153,35 @@ def test_bootstrap_failure_is_reported(harness, storage, stage, case):
     assert suite.get("errors") == "1"
     assert suite.find("testcase").get("name") == case
     assert "mock cluster snapshot" in suite.find("testcase/error").text
-    if stage in ("deploy", "url", "available", "server-info", "version"):
+    if stage in (
+        "deploy",
+        "url",
+        "available",
+        "server-info",
+        "curl-timeout",
+        "version",
+    ):
         assert (results / "debug-collected").exists()
     if stage == "server-info":
         assert "HTTP=503" in result.stdout
         assert "mock server response" in suite.find("testcase/error").text
+    if stage == "curl-timeout":
+        assert "HTTP=200 curl_exit=28" in result.stdout
+        assert "last_curl_exit=28" in suite.find("testcase/error").get("message")
 
 
-@pytest.mark.parametrize("stage,returncode", [("success", 0), ("pytest", 1)])
+@pytest.mark.parametrize(
+    "stage,returncode", [("success", 0), ("pytest", 1), ("curl-retry", 0)]
+)
 def test_authenticated_readiness_preserves_pytest_report(harness, stage, returncode):
     run, results = harness
     result = run(stage)
     assert result.returncode == returncode, result.stdout + result.stderr
     suite = parse(results / "xunit_report_file.xml").getroot().find("testsuite")
     assert suite.get("name") == "pytest-original"
+    if stage == "curl-retry":
+        assert "HTTP=200 curl_exit=28" in result.stdout
+        assert (results / "curl-retried").exists()
 
 
 def test_existing_pytest_report_survives_harness_error(harness):
@@ -171,3 +193,31 @@ def test_existing_pytest_report_survives_harness_error(harness):
     result = run("config", DB_TYPE="invalid")
     assert result.returncode == 1, result.stdout + result.stderr
     assert report.read_text() == original
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("-o", "junit_suite_name=MLflow E2E"),
+        ("--override-ini", "junit_suite_name=MLflow E2E"),
+        ("--override-ini=junit_suite_name=MLflow E2E",),
+        ("-ojunit_suite_name=MLflow E2E",),
+        ("-o=junit_suite_name=MLflow E2E",),
+    ],
+)
+def test_bootstrap_report_preserves_suite_name_spaces(harness, args):
+    run, results = harness
+    result = run("config", pytest_args=args, DB_TYPE="invalid")
+    assert result.returncode == 1, result.stdout + result.stderr
+    suite = parse(results / "xunit_report_file.xml").getroot().find("testsuite")
+    assert suite.get("name") == "MLflow E2E"
+
+
+def test_unrelated_pytest_argument_does_not_override_suite_name(harness):
+    run, results = harness
+    result = run(
+        "config", pytest_args=("-k", "junit_suite_name=other suite"), DB_TYPE="invalid"
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    suite = parse(results / "xunit_report_file.xml").getroot().find("testsuite")
+    assert suite.get("name") == "backport-e2e"

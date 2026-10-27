@@ -1,6 +1,7 @@
 from pathlib import Path
 from xml.etree.ElementTree import parse
 
+import pytest
 from write_harness_junit import harness_junit_path, write_harness_error_junit
 
 
@@ -77,3 +78,50 @@ def test_write_harness_error_junit_replace_overwrites_existing(tmp_path: Path) -
     case = root.find("testsuite").find("testcase")
     assert case.get("name") == "test_deploy"
     assert "snapshot included" in (case.find("error").text or "")
+
+
+@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "\x00",
+        "\x01",
+        "\x0b",
+        "\x1b",
+        "\x1f",
+        pytest.param("\ud800", id="high-surrogate"),
+        pytest.param("\udce2", id="truncated-utf8-surrogate"),
+        "\ufffe",
+        "\uffff",
+    ],
+)
+def test_diagnostics_are_xml_safe(tmp_path: Path, invalid: str, replace: bool) -> None:
+    output = tmp_path / "xunit_report_file.xml"
+    if replace:
+        write_harness_error_junit(
+            str(output), test_name="test_deploy", message="initial"
+        )
+    valid = '\t\né中😀<&>"\ud7ff\ue000\ufffd\U0010ffff'
+    diagnostics = f"before{invalid}after{valid}"
+    expected = f"before\ufffdafter{valid}"
+
+    assert write_harness_error_junit(
+        str(output),
+        suite_name=diagnostics,
+        classname=diagnostics,
+        test_name=diagnostics,
+        message=diagnostics,
+        body=diagnostics,
+        hostname=diagnostics,
+        replace=replace,
+    )
+
+    suite = parse(output).getroot().find("testsuite")
+    case = suite.find("testcase")
+    error = case.find("error")
+    assert suite.get("name") == expected
+    assert suite.get("hostname") == expected
+    assert case.get("classname") == expected
+    assert case.get("name") == expected
+    assert error.get("message") == expected
+    assert error.text == expected
