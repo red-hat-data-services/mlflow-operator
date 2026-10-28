@@ -24,6 +24,8 @@ def harness(tmp_path: Path):
     debug.write_text(
         "#!/bin/bash\nset -eu\n"
         'test -s "$TEST_RESULTS_DIR/xunit_report_${STORAGE_TYPE}.xml"\n'
+        'while [ "$1" != --output-dir ]; do shift; done\n'
+        'mkdir -p "$2"\ntouch "$2/full-logs-collected"\n'
         'touch "$TEST_RESULTS_DIR/debug-collected"\n'
     )
     debug.chmod(0o755)
@@ -76,6 +78,8 @@ elif cmd == "uv":
         output = next(a.split("=", 1)[1] for a in args if a.startswith("--junit-xml="))
         Path(output).write_text("<testsuites><testsuite name='pytest-original'/></testsuites>")
         sys.exit(1 if stage == "pytest" else 0)
+    if stage == "second-deploy" and args[args.index("--artifact-storage") + 1] != "file":
+        sys.exit(7)
     sys.exit(7 if stage == "deploy" else 0)
 elif cmd == "sleep":
     pass
@@ -221,3 +225,47 @@ def test_unrelated_pytest_argument_does_not_override_suite_name(harness):
     assert result.returncode == 1, result.stdout + result.stderr
     suite = parse(results / "xunit_report_file.xml").getroot().find("testsuite")
     assert suite.get("name") == "backport-e2e"
+
+
+@pytest.mark.parametrize("storage", ["s3", "externals3"])
+def test_later_backend_failure_excludes_previous_diagnostics(harness, storage):
+    run, results = harness
+    shared_debug = results / "debug"
+    shared_debug.mkdir(parents=True)
+    (shared_debug / "server-info-last-body.txt").write_text("stale shared response")
+    (shared_debug / "failure-snapshot.txt").write_text("stale shared snapshot")
+
+    result = run(
+        "second-deploy",
+        ARTIFACT_BACKENDS=f"file,{storage}",
+        SKIP_CLEANUP="false",
+        AWS_ACCESS_KEY_ID="test-key",
+        AWS_SECRET_ACCESS_KEY="test-secret",
+        BUCKET="test-bucket",
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        shared_debug / "file/server-info-last-body.txt"
+    ).read_text() == "mock server response"
+    current_debug = shared_debug / storage
+    assert (current_debug / "full-logs-collected").exists()
+    snapshot = (current_debug / "failure-snapshot.txt").read_text()
+    assert "mock server response" not in snapshot
+    assert "stale shared" not in snapshot
+    case = (
+        parse(results / f"xunit_report_{storage}.xml")
+        .getroot()
+        .find("./testsuite/testcase")
+    )
+    assert case.get("name") == "test_deploy"
+    assert "mock server response" not in case.find("error").text
+    assert "stale shared" not in case.find("error").text
+    assert (results / "xunit_report_file.xml").exists()
+
+
+def test_failure_without_storage_uses_bootstrap_directory(harness):
+    run, results = harness
+    result = run("config", storage="", DB_TYPE="invalid")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (results / "debug/bootstrap/failure-snapshot.txt").exists()
+    assert (results / "xunit_report.xml").exists()

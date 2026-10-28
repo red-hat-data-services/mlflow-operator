@@ -208,6 +208,10 @@ harness_junit_path() {
     fi
 }
 
+harness_debug_dir() {
+    printf '%s\n' "${TEST_RESULTS_DIR}/debug/${STORAGE_TYPE:-bootstrap}"
+}
+
 harness_error_body() {
     local message="$1"
     printf '%s\n' "$message"
@@ -220,13 +224,13 @@ harness_error_body() {
 }
 
 # Compact cluster/HTTP snapshot for Jenkins Test Result. Full pod logs still go
-# through collect-debug-logs.sh into TEST_RESULTS_DIR/debug/.
+# through collect-debug-logs.sh into TEST_RESULTS_DIR/debug/<storage>/.
 # kubectl calls are time-bounded so a hung API cannot block JUnit emission;
 # fail_suite/fail_run write the XML first, then snapshot, then refresh the
 # harness report if we created it.
 capture_failure_snapshot() {
     local reason="${1:-harness failure}"
-    local snapshot_dir="${TEST_RESULTS_DIR}/debug"
+    local snapshot_dir="$(harness_debug_dir)"
     local snapshot_file="${snapshot_dir}/failure-snapshot.txt"
     local kubectl_cmd=(kubectl --request-timeout=15s)
     mkdir -p "$snapshot_dir" || return 0
@@ -278,7 +282,7 @@ write_harness_junit_error() {
     local extra_args=()
     output_file="$(harness_junit_path)"
     body="$(harness_error_body "$message")"
-    snapshot_file="${TEST_RESULTS_DIR}/debug/failure-snapshot.txt"
+    snapshot_file="$(harness_debug_dir)/failure-snapshot.txt"
     if [ -f "$snapshot_file" ]; then
         body="${body}"$'\n\n'"$(head -c 8192 "$snapshot_file" 2>/dev/null || true)"
     fi
@@ -578,7 +582,7 @@ collect_debug_logs() {
     echo "  Collecting debug logs after ${failure_reason}..."
     if ! "$SCRIPT_DIR/collect-debug-logs.sh" \
         --namespace "$NAMESPACE" \
-        --output-dir "${TEST_RESULTS_DIR}/debug"; then
+        --output-dir "$(harness_debug_dir)"; then
         echo "WARN: debug log collection failed for namespace '${NAMESPACE}' after ${failure_reason}" >&2
     fi
 }
@@ -611,7 +615,7 @@ wait_for_mlflow_server_info() {
     local api_url="${MLFLOW_TRACKING_URI%/}/api/3.0/mlflow/server-info"
     local retry=0
     local max_retries=36  # 36 × 5 s = 3 min
-    local debug_dir="${TEST_RESULTS_DIR}/debug"
+    local debug_dir="$(harness_debug_dir)"
     local body_file="${debug_dir}/server-info-last-body.txt"
     local err_file="${debug_dir}/server-info-last-stderr.txt"
     local http_code=""
@@ -1054,7 +1058,7 @@ run_suite() {
     if [ "$suite_exit" -ne 0 ]; then
         if ! "$SCRIPT_DIR/collect-debug-logs.sh" \
             --namespace "$NAMESPACE" \
-            --output-dir "${TEST_RESULTS_DIR}/debug"; then
+            --output-dir "$(harness_debug_dir)"; then
             echo "WARN: debug log collection failed for namespace '${NAMESPACE}'" >&2
         fi
     fi
