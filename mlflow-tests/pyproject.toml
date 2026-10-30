@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "kubernetes>=35,<37",
-    "mlflow>=3.15.0,<4",
+    # Pin to a revision containing the Skills Registry client APIs until they
+    # are available in a released MLflow version. Keep this aligned with the
+    # runtime image used by the integration tests.
+    "mlflow @ git+https://github.com/opendatahub-io/mlflow.git@49763d36349b23b7a74dfa24f24d26009b8c30a5",
     "pytest>=9.0.2",
     "boto3>=1.42.40",
     "pydantic>=2.0.0",
@@ -38,6 +41,7 @@ markers = [
     "Traces: Test trace RBAC and direct trace-ingestion behavior",
     "Workspaces: Test Kubernetes workspace discovery and filtering",
     "MCPRegistry: Test MCP Server Registry RBAC and lifecycle operations",
+    "SkillRegistry: Test Skill Registry RBAC, lifecycle, and artifact operations",
     "pre_upgrade: Seed static MLflow state before an upgrade",
     "post_upgrade: Validate static MLflow state after an upgrade",
 ]
