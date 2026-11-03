@@ -168,6 +168,14 @@ When deploying on OpenShift (`openShift.enabled: true`), the deployment includes
 
 The Helm chart does not create an OpenShift Route. Create your own Route if you need external exposure on OpenShift.
 
+### Startup probes
+
+`spec.startupProbe` and the chart's top-level `startupProbe` configure tracking
+server startup timing. Defaults are 18 failures at 10-second intervals
+(approximately 180 seconds); the HTTPS server-info endpoint and success
+threshold remain fixed. Keep these defaults aligned with the CRD markers.
+Migration Jobs must continue to clear all three probes.
+
 ### Customizing Values
 
 The MLflow CR spec fields map directly to Helm chart values. See example configurations:
@@ -328,7 +336,9 @@ fork's migration-gap and UI-E2E references change.
 
 ### Linting
 
-This repo uses golangci-lint; to ensure linting is successful after code changes, run
+Keep the golangci-lint versions in `Makefile` and `.github/workflows/lint.yml` aligned
+and compatible with the Go version in `go.mod` (currently v2.13.0 for Go 1.26).
+To ensure linting is successful after code changes, run
 
 ```bash
 golangci-lint run
@@ -364,6 +374,7 @@ The `config/samples/` directory contains example MLflow custom resource configur
 
 4. **mlflow_v1_mlflow_remote_storage.yaml** - Remote storage with garbage collection
    - PostgreSQL primary/read-replica routing for metadata
+   - Configurable startup probe for slow external-database initialization
    - S3 for artifacts
    - No PVC required (fully remote)
    - Multi-replica deployment

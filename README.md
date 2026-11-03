@@ -201,6 +201,30 @@ The operator requires two levels of RBAC permissions:
 
 See the manifest files for detailed per-resource documentation.
 
+### Startup probe
+
+The tracking server allows approximately
+**180 seconds** for startup by default (18 failed checks at 10-second intervals).
+Its HTTPS startup probe checks `/api/3.0/mlflow/server-info` under the server's
+static prefix. Liveness and readiness probes wait until startup succeeds; a fast
+startup proceeds as soon as the first check succeeds.
+
+For external databases that require a longer startup window, configure probe
+timing through the MLflow CR. Unspecified fields retain their defaults:
+
+```yaml
+spec:
+  startupProbe:
+    failureThreshold: 30  # Approximately 300 seconds with the default period
+```
+
+Standalone Helm installations use the same top-level `startupProbe` values.
+Available fields are `initialDelaySeconds` (default `0`, minimum `0`),
+`timeoutSeconds` (default `1`, minimum `1`), `periodSeconds` (default `10`, minimum
+`1`), and `failureThreshold` (default `18`, minimum `1`). The endpoint and success threshold are fixed. The existing
+liveness and readiness timings are unchanged. A longer startup window tolerates
+slow initialization; unusually slow database connections still warrant investigation.
+
 ### Storage Configuration
 
 `backendStoreUri` (or `backendStoreUriFrom`) is required on new creates and updates. Inline `backendStoreUri` and `registryStoreUri` intentionally accept only the documented SQL schemes (`sqlite://` and `postgresql://`). To avoid breaking already-stored CRs created before this validation was introduced, the operator still falls back to the legacy implicit SQLite backend during reconciliation when both fields are unset.
@@ -486,6 +510,8 @@ See the [config/samples](./config/samples/) directory for complete examples:
 ## Development
 
 For API and code-generation changes, use `make generate` and `make manifests`. The Makefile scopes `controller-gen` to the root controller package plus the nested `api/` module so unrelated nested repo copies or temp trees under the workspace do not affect generated output. Keep the Kubernetes dependency versions in the root module and `api/go.mod` aligned so generation runs against the same API types the operator binary uses.
+
+CI and the Makefile use golangci-lint v2.13.0, compatible with the repository’s Go 1.26 requirement. Run `make golangci-lint` to install it, then `bin/golangci-lint run`.
 
 ## Testing
 

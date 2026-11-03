@@ -238,10 +238,8 @@ func (h *HelmRenderer) mlflowToHelmValues(
 	//   2. Glob *.crt and *.pem files from each ConfigMap mount path
 	// Mount paths are derived from configMaps in the template via mlflow.caBundleMountPaths
 	var caConfigMaps []map[string]interface{}
-	var caFilePaths []string
-
 	// Always include system CA bundle first
-	caFilePaths = append(caFilePaths, systemCAPath)
+	caFilePaths := []string{systemCAPath}
 
 	// Add platform CA bundle if detected
 	if opts.PlatformTrustedCABundleExists {
@@ -291,6 +289,14 @@ func (h *HelmRenderer) mlflowToHelmValues(
 		replicas = *mlflow.Spec.Replicas
 	}
 	values["replicaCount"] = replicas
+
+	if mlflow.Spec.StartupProbe != nil {
+		probeValues, err := runtime.DefaultUnstructuredConverter.ToUnstructured(mlflow.Spec.StartupProbe)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert startupProbe: %w", err)
+		}
+		values["startupProbe"] = probeValues
+	}
 
 	if mlflow.Spec.Resources != nil {
 		resourcesMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(mlflow.Spec.Resources)
