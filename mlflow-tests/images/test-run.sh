@@ -181,17 +181,20 @@ JUNIT_SUITE_NAME="mlflow-e2e"
 for ((i=0; i<${#PYTEST_ARGS[@]}; i++)); do
     arg="${PYTEST_ARGS[$i]}"
     mark_expr=""
-    if [[ "$arg" == *junit_suite_name=* ]]; then
-        JUNIT_SUITE_NAME="${arg#*junit_suite_name=}"
-        JUNIT_SUITE_NAME="${JUNIT_SUITE_NAME%% *}"
-    elif [ "$arg" = "-o" ]; then
-        next_index=$((i + 1))
-        if [ "$next_index" -lt "${#PYTEST_ARGS[@]}" ]; then
-            next_opt="${PYTEST_ARGS[$next_index]}"
-            if [[ "$next_opt" == junit_suite_name=* ]]; then
-                JUNIT_SUITE_NAME="${next_opt#junit_suite_name=}"
+    next_opt=""
+    case "$arg" in
+        -o|--override-ini)
+            next_index=$((i + 1))
+            if [ "$next_index" -lt "${#PYTEST_ARGS[@]}" ]; then
+                next_opt="${PYTEST_ARGS[$next_index]}"
             fi
-        fi
+            ;;
+        -ojunit_suite_name=*) next_opt="${arg#-o}" ;;
+        -o=junit_suite_name=*) next_opt="${arg#-o=}" ;;
+        --override-ini=junit_suite_name=*) next_opt="${arg#--override-ini=}" ;;
+    esac
+    if [[ "$next_opt" == junit_suite_name=* ]]; then
+        JUNIT_SUITE_NAME="${next_opt#junit_suite_name=}"
     fi
     if [[ "$arg" == -m=* ]]; then
         mark_expr="${arg#-m=}"
@@ -224,6 +227,10 @@ harness_junit_path() {
     fi
 }
 
+harness_debug_dir() {
+    printf '%s\n' "${TEST_RESULTS_DIR}/debug/${STORAGE_TYPE:-bootstrap}"
+}
+
 harness_error_body() {
     local message="$1"
     printf '%s\n' "$message"
@@ -236,10 +243,10 @@ harness_error_body() {
 }
 
 # Compact cluster/HTTP snapshot for Jenkins Test Result. Full pod logs still go
-# through collect-debug-logs.sh into TEST_RESULTS_DIR/debug/.
+# through collect-debug-logs.sh into TEST_RESULTS_DIR/debug/<storage>/.
 capture_failure_snapshot() {
     local reason="${1:-harness failure}"
-    local snapshot_dir="${TEST_RESULTS_DIR}/debug"
+    local snapshot_dir="$(harness_debug_dir)"
     local snapshot_file="${snapshot_dir}/failure-snapshot.txt"
     mkdir -p "$snapshot_dir" || return 0
 
@@ -289,7 +296,7 @@ write_harness_junit_error() {
     local output_file body snapshot_file
     output_file="$(harness_junit_path)"
     body="$(harness_error_body "$message")"
-    snapshot_file="${TEST_RESULTS_DIR}/debug/failure-snapshot.txt"
+    snapshot_file="$(harness_debug_dir)/failure-snapshot.txt"
     if [ -f "$snapshot_file" ]; then
         body="${body}"$'\n\n'"$(head -c 8192 "$snapshot_file" 2>/dev/null || true)"
     fi
@@ -702,7 +709,7 @@ collect_debug_logs() {
     echo "  Collecting debug logs after ${failure_reason}..."
     if ! "$SCRIPT_DIR/collect-debug-logs.sh" \
         --namespace "$NAMESPACE" \
-        --output-dir "${TEST_RESULTS_DIR}/debug"; then
+        --output-dir "$(harness_debug_dir)"; then
         echo "WARN: debug log collection failed for namespace '${NAMESPACE}' after ${failure_reason}" >&2
     fi
 }
@@ -837,32 +844,34 @@ wait_for_mlflow_server_info() {
     local api_url="${MLFLOW_TRACKING_URI%/}/api/3.0/mlflow/server-info"
     local retry=0
     local max_retries=36  # 36 × 5 s = 3 min
-    local debug_dir="${TEST_RESULTS_DIR}/debug"
+    local debug_dir="$(harness_debug_dir)"
     local body_file="${debug_dir}/server-info-last-body.txt"
     local err_file="${debug_dir}/server-info-last-stderr.txt"
     local http_code=""
+    local curl_rc=0
     local err_preview body_preview
     mkdir -p "$debug_dir"
 
     echo "  Waiting for MLflow server-info endpoint at $api_url..."
     while true; do
+        curl_rc=0
         http_code="$(curl -skS --connect-timeout 5 --max-time 5 \
             -H "Authorization: Bearer ${kube_token}" \
-            -o "$body_file" -w "%{http_code}" "$api_url" 2>"$err_file" || true)"
+            -o "$body_file" -w "%{http_code}" "$api_url" 2>"$err_file")" || curl_rc=$?
         [ -n "$http_code" ] || http_code="000"
-        if [ "$http_code" = "200" ]; then
+        if [ "$curl_rc" -eq 0 ] && [ "$http_code" = "200" ]; then
             echo "  MLflow server-info endpoint is reachable (HTTP 200)"
             return 0
         fi
         retry=$((retry + 1))
         err_preview="$(tr '\n' ' ' < "$err_file" 2>/dev/null | head -c 180 || true)"
         body_preview="$(tr '\n' ' ' < "$body_file" 2>/dev/null | head -c 180 || true)"
-        echo "  Attempt $retry/$max_retries HTTP=${http_code} err=${err_preview:-none} body=${body_preview:-<empty>}"
+        echo "  Attempt $retry/$max_retries HTTP=${http_code} curl_exit=${curl_rc} err=${err_preview:-none} body=${body_preview:-<empty>}"
         if [ "$retry" -ge "$max_retries" ]; then
             echo "ERROR: MLflow server-info endpoint did not become reachable within timeout" >&2
             collect_debug_logs "server-info readiness failure"
             fail_suite "test_wait_for_mlflow_server_info" \
-                "MLflow server-info endpoint did not become reachable within timeout (url: ${api_url}, last_http=${http_code})"
+                "MLflow server-info endpoint did not become reachable within timeout (url: ${api_url}, last_http=${http_code}, last_curl_exit=${curl_rc})"
             return 1
         fi
         sleep 5
@@ -1481,7 +1490,7 @@ run_suite_body() {
     if [ "$suite_exit" -ne 0 ]; then
         if ! "$SCRIPT_DIR/collect-debug-logs.sh" \
             --namespace "$NAMESPACE" \
-            --output-dir "${TEST_RESULTS_DIR}/debug"; then
+            --output-dir "$(harness_debug_dir)"; then
             echo "WARN: debug log collection failed for namespace '${NAMESPACE}'" >&2
         fi
     fi
