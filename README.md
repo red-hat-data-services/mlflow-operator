@@ -205,6 +205,31 @@ The operator requires two levels of RBAC permissions:
 
 See the manifest files for detailed per-resource documentation.
 
+### Startup probe
+
+The tracking server and optional dedicated artifact server allow approximately
+**180 seconds** for startup by default (18 failed checks at 10-second intervals).
+Their HTTPS startup probe checks `/api/3.0/mlflow/server-info` under each server's
+static prefix. Liveness and readiness probes wait until startup succeeds; a fast
+startup proceeds as soon as the first check succeeds.
+
+For external databases that require a longer startup window, configure probe
+timing through the MLflow CR. Unspecified fields retain their defaults:
+
+```yaml
+spec:
+  startupProbe:
+    failureThreshold: 30  # Approximately 300 seconds with the default period
+```
+
+Standalone Helm installations use the same top-level `startupProbe` values.
+Available fields are `initialDelaySeconds` (default `0`, minimum `0`),
+`timeoutSeconds` (default `1`, minimum `1`), `periodSeconds` (default `10`, minimum
+`1`), and `failureThreshold` (default `18`, minimum `1`). These settings apply to
+both servers; the endpoint and success threshold are fixed. The existing
+liveness and readiness timings are unchanged. A longer startup window tolerates
+slow initialization; unusually slow database connections still warrant investigation.
+
 ### Storage Configuration
 
 `backendStoreUri` (or `backendStoreUriFrom`) is required on new creates and updates. Inline `backendStoreUri` and `registryStoreUri` intentionally accept only the documented SQL schemes (`sqlite://` and `postgresql://`). To avoid breaking already-stored CRs created before this validation was introduced, the operator still falls back to the legacy implicit SQLite backend during reconciliation when both fields are unset.
@@ -366,6 +391,20 @@ By default, finished migration Jobs remain visible for 24 hours before TTL clean
 During the migration flow, the operator resolves the final MLflow image, scales the MLflow Deployment to zero, waits for all MLflow replicas to disappear, runs a one-shot Job against the backend and registry stores, verifies that the migration image reports the supported MLflow version, restores the requested replica count, and updates `status.version` only after the post-migration rollout is ready.
 The migration Job explicitly disables `MLFLOW_READ_REPLICA_BACKEND_STORE_URI`, so schema changes never target the read replica.
 For ODH/RHOAI MLflow images that ship `mlflow.store.db.migration_gap`, that Job also runs the backend-only RHOAI `3.3 -> 3.4` gap repair before the generic MLflow migration logic.
+
+### Trace Analytics Prepopulation
+
+Administrators can run `mlflow db prepopulate-trace-analytics` against a live
+deployment's Secret-backed primary PostgreSQL store to reduce backfill work
+during the final upgrade. The operator does not manage this Job.
+
+Prepopulation is rerun-safe and does not advance the Alembic revision. It must
+not overlap another prepopulation Job or a database migration; the final
+operator-managed `mlflow db upgrade` remains required.
+
+See the [sample Job](config/samples/trace_analytics_prepopulation_job.yaml) and
+[administrator runbook](docs/trace-analytics-prepopulation.md) for image selection,
+permissions, migration preflight checks, and safe reruns.
 
 ### Trace Archival
 
@@ -721,6 +760,7 @@ See the [config/samples](./config/samples/) directory for complete examples:
 - `mlflow_v1_mlflow_remote_storage.yaml` - PostgreSQL primary/read-replica routing + S3 storage with horizontal scaling and a temporary storage override for proxied artifact serving
 - `mlflow_v1_mlflow_artifacts_server.yaml` - Split tracking and metadata-aware artifact-serving servers using PostgreSQL and S3
 - `mlflow_v1_mlflow_trace_rollups.yaml` - SQL trace rollup timing, resources, and runtime tuning
+- `trace_analytics_prepopulation_job.yaml` - Admin-run Job that prepopulates trace analytics columns ahead of the final `mlflow db upgrade`
 - `mlflow_v1_mlflowconfig.yaml` - Namespace-scoped artifact storage override using the upstream `MLflowConfig` CRD
 
 ## Development
@@ -737,6 +777,12 @@ MLflow coverage is split between:
 Ginkgo e2e covers trace archival CEL validation and operator resource lifecycle/cleanup without waiting for a cron tick or starting a Job against dummy storage. `mlflow-tests` smoke coverage creates several traces, persists them as DB-backed spans via OTLP `/v1/traces` (the supported 3.17 gateway preserves `/mlflow/v1`; Kind uses the unprefixed pod path), waits past a short harness-configured retention, runs a live archival Job from the CronJob template on object storage (`s3` / `externals3`), and verifies both archive object creation and post-archive trace readability. Live `file://` archival Jobs are avoided because the default PVC is ReadWriteOnce.
 
 Garbage collection has the same two-layer coverage. Ginkgo verifies that `spec.garbageCollection` creates and removes `mlflow-gc`, its ServiceAccount, and GC RBAC without allowing the CronJob to fire. On PostgreSQL + S3-compatible harness rows, `mlflow-tests` soft-deletes an experiment with a run artifact, runs a one-off Job from the `mlflow-gc` template, and verifies permanent removal of the run, experiment, and backing object. The test also runs in the dedicated split artifact-server S3 matrix to cover artifact-server locations.
+
+Trace analytics prepopulation has opt-in live coverage through the
+`trace_analytics_prepopulation` pytest phase and
+[dedicated CI workflow](.github/workflows/trace-analytics-prepopulation.yml).
+They cover backfill, rerun idempotency, and the final database upgrade against
+a CI predecessor fixture; see the testing guide for setup and coverage limits.
 
 For a repo-level map of Red Hat OpenShift AI MLflow fork validation, including
 Jenkins shift-left smoke and upgrade coverage, see the
