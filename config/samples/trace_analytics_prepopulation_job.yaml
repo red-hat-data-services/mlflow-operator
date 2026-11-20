@@ -57,17 +57,9 @@ spec:
             sizeLimit: 256Mi
       containers:
         - name: mlflow-prepopulate-trace-analytics
-          # Use an MLflow image that contains the prepopulation command
-          # (the MLflow line currently deployed by the operator). Pin by digest
-          # for reproducibility; see mlflow_v1_mlflow_digest.yaml for how to
-          # resolve digests. The Job image may be newer than the live server
-          # image: the Job only runs the database command, while the live
-          # server must stay untouched at the predecessor schema.
-          # This default is the OpenDataHub channel image; no release
-          # mechanism rewrites it per channel. On OpenShift AI, read the
-          # digest-pinned registry.redhat.io/rhoai/odh-mlflow-rhel9 image
-          # from the live Deployment instead (runbook prerequisite 2).
-          image: quay.io/opendatahub/mlflow:odh-stable
+          # Use the MLflow image for the RHOAI release you plan to upgrade to,
+          # not the image from the currently running Deployment.
+          image: registry.redhat.io/rhoai/odh-mlflow-rhel9@sha256:d8c8adb135bed9c595df32d6fce64fdfd67bc02eb34b4e373b7ee2185210e58b
           imagePullPolicy: IfNotPresent
           # The `mlflow` CLI reads the database URL from MLFLOW_TRACKING_URI,
           # keeping credentials out of process arguments and shell history.

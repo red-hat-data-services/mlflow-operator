@@ -4,6 +4,12 @@ Platform administrators can backfill trace analytics before an OpenShift AI
 (RHOAI) MLflow upgrade while MLflow keeps serving traffic. This Job is
 administrator-run; the MLflow operator does not schedule or manage it.
 
+> **Optional: Prepopulate trace analytics before upgrading.** You can skip
+> the [standalone Job](../config/samples/trace_analytics_prepopulation_job.yaml)
+> and follow the standard upgrade. The migration still backfills trace
+> analytics, which can take longer on databases with many traces. If you run
+> the Job, wait for it to finish before starting the required upgrade.
+
 ## Background
 
 `mlflow db prepopulate-trace-analytics` backfills denormalized columns ahead
@@ -82,27 +88,10 @@ Always take a database backup before changing the database schema or contents.
    statements, as well as read and update their rows. Normal MLflow serving
    permissions alone may not be sufficient.
 
-2. **Pick the Job image.** Use an image from your distribution channel that
-   contains `mlflow db prepopulate-trace-analytics`, pinned by digest. Inspect
-   the live Deployment's image as a starting point:
-
-   ```console
-   $ kubectl get deployment mlflow -n redhat-ods-applications \
-       -o jsonpath='{.spec.template.spec.containers[?(@.name=="mlflow")].image}'
-   registry.redhat.io/rhoai/odh-mlflow-rhel9@sha256:…
-   ```
-
-   The sample manifest's checked-in default is the OpenDataHub channel
-   image (`quay.io/opendatahub/mlflow`); it is not rewritten per channel.
-   On OpenShift AI, replace it with the appropriate
-   `registry.redhat.io/rhoai/odh-mlflow-rhel9` image and configure its pull
-   credentials before applying the Job.
-
-   If the deployed image predates the command, choose a newer image from
-   the same channel, not an arbitrary upstream build. Only the Job uses that
-   image: leave the live server at the predecessor schema. Resolve image
-   digests with `skopeo inspect docker://<image>` after logging in to the
-   registry if required.
+2. **Confirm the Job image.** This Job runs before the upgrade, but it should use
+   the MLflow image for the RHOAI release you plan to upgrade to. Update the
+   sample image if it does not match your upgrade target. Do not use the image
+   from the currently running Deployment.
 
 3. **Confirm no migration is in flight or about to start.** Check that the
    MLflow CR's `Migration` condition is `True` **and** that its
